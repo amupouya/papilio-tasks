@@ -333,6 +333,8 @@ Run `broker` with the native worker CLI and `scheduler` with beat. Scheduler
 beat includes both its retry source and label schedules; projection beat
 includes its retry source. Queue/group/prefix/result TTL are explicit settings.
 The existing factories still support custom transports and source composition.
+Pass a common `retry=RetryRuntime(...)` to share retry configuration; see
+[Retry policies](#retry-policies) for the separate shared retry beat.
 
 `apps.events.rabbit.create_app(url, providers=..., publishers=...,
 subscribers=...)` assembles a Rabbit event application. `connect()` enables
@@ -395,7 +397,9 @@ asyncio.run(main())
 ```
 
 `run` is a local method. `enqueue` publishes a task and returns its native Taskiq
-handle. `Report.task()` exposes the registered native task and its scheduling
+handle. Its arguments are inferred from `run`, and `Report.enqueue(3)` returns
+`AsyncTaskiqTask[int]` for the example above. No decorator or repeated argument
+annotations are required. `Report.task()` exposes the native task and scheduling
 helpers. Registration does not construct the scheduler. Providers determine its
 scope: REQUEST gives one instance per execution, APP permits shared instances.
 
@@ -535,61 +539,122 @@ broker/beat entrypoints above do not register those classes twice in one process
 
 ## Retry policies
 
-Set an immutable policy on a scheduler class. It is inherited normally;
-`retry = None` disables the class policy. `attempts` counts all executions,
-including the first, and `delay` is a fixed delay in seconds before a retry.
+Each module owns its task policy. `Retry` is immutable and independent of Taskiq;
+`retry = None` disables the class policy. `attempts` includes the first execution.
+A numeric `delay` is fixed seconds; `Backoff` computes capped exponential delays.
+For example, without jitter, this policy requests delays of 2, 4 and 8 seconds:
 
 ```python
-from typing import ClassVar
-
-from papilio_tasks.tools.retry import Retry
+from papilio_tasks.tools.retry import Backoff, Retry
 from papilio_tasks.apps.schedulers import Scheduler
 
-
 class Report(Scheduler):
-    retry: ClassVar[Retry | None] = Retry(
-        attempts=4, delay=10, errors=(ConnectionError, TimeoutError),
+    retry = Retry(
+        attempts=4,
+        delay=Backoff(initial=2, multiplier=2, max_delay=30),
+        errors=(ConnectionError, TimeoutError),
     )
 
     async def run(self, id: int):
         ...
 ```
 
-Supply a writable retry source explicitly to `create_broker`. Use the same
-source in `create_beat`; worker and beat processes must use the same storage
-namespace. Source selection does not depend on the broker: RabbitMQ can use
-a Redis schedule source. Keep the registrar and providers appropriate to your
-scheduler classes:
+`Backoff(..., jitter=True)` uses full jitter: each delay is sampled uniformly
+between zero and that attempt's capped delay. Counts, error filtering and task
+execution remain native Taskiq behavior; retrying reruns the whole task with a
+new Dishka request scope. The initial publication is never delayed by this policy.
+
+### Shared execution configuration and retry beat
+
+Select execution resources once in bootstrap, independently of business modules.
+Schedulers and projections use the same `RetryRuntime`; their native brokers may
+be different. This example uses optional Redis storage, not a required backend:
 
 ```python
+from papilio_tasks.apps.taskiq import RetryRuntime
+from papilio_tasks.apps.schedulers.application import (
+    create_broker as create_scheduler_broker,
+)
+from papilio_tasks.apps.projections.application import (
+    create_broker as create_projection_broker,
+)
 from papilio_tasks.infra.taskiq.sources.backends.redis import RedisSource
 
-source = RedisSource("redis://localhost:6379/0", prefix="jobs")
-broker = create_broker(
-    registrar=registrar, providers=providers, modules=["app.modules"],
-    retry_source=source,
+source = RedisSource("redis://localhost:6379/0", prefix="task-retries")
+retry = RetryRuntime(source=source)
+scheduler = create_scheduler_broker(
+    registrar=scheduler_registry, providers=providers,
+    modules=["app.modules"], retry=retry,
 )
-beat = create_beat(broker, sources=[source])
+projection = create_projection_broker(
+    registrar=projection_registry, providers=providers,
+    modules=["app.modules"], retry=retry,
+)
+retry_beat = retry.create_beat(brokers=[scheduler, projection])
 ```
 
-Manual inclusion and discovery apply the same policy. Missing/read-only retry
-sources and conflicting retry labels are rejected. One Taskiq
-`SmartRetryMiddleware` handles retries per broker; an existing retry middleware
-cannot be combined with this managed setup. A small delay adapter keeps
-`retry_delay` separate from RabbitMQ's publication `delay`, so the initial
-submission is not delayed by the retry policy. Counts, exception filtering and
-rescheduling use Taskiq's implementation, preserving the original task ID,
-arguments and queue. The whole job runs again with a new Dishka request scope.
+Run each worker explicitly and run `retry_beat` with the native beat command,
+for example `papilio_tasks scheduler beat app.tasks:retry_beat`. Factories open
+no connections and never launch beat automatically. Separate processes construct
+their own source/runtime pointing to the same backing store and namespace.
+Delays set the earliest eligibility time. Beat polling and worker availability
+can make execution later; the native `--update-interval` and `--loop-interval`
+options control beat refresh and dispatch polling.
+`MemorySource` is suitable only when workers and beat share a process/store.
 
-Worker startup/shutdown invokes the retry source's native lifecycle methods;
-the beat CLI owns its process's source lifecycle. Factories open no connections.
-Memory sources work only when execution and beat share the same in-process store.
-Beat must be running to dispatch retries; its polling interval can make execution
-later than the configured delay (`--update-interval` controls source refresh).
-Source-specific cleanup semantics remain those of its native implementation.
-This retries job execution, not failed producer publication. Publication hooks
-observe submission separately; final-failure hooks remain pending. Projections use the same
-policy and adapter through their own application factory, as described below.
+Any writable `MutableSourceContract` adapter can be selected. A native Taskiq
+`ScheduleSource` with implemented add/delete operations is accepted directly;
+use `MutableSource` to declare a custom adapter's write capability explicitly.
+Read-only feeds such as `LabelScheduleSource` cannot store retries. Source
+serialization, persistence and delivery semantics remain backend-owned.
+
+Use **one logical retry beat per shared source**. It consumes that source once
+and uses each task's registered native broker for dispatch. Import/discover all
+participating task modules in the beat process. Task names must be unique across
+its brokers; fully qualified default names suit modular applications. Unknown or
+ambiguous destinations fail without deleting the schedule. Native pre/post-send
+hooks, task IDs, payloads, labels and backend routing are retained. A failed send
+leaves the entry stored. Taskiq 0.12 can mark a one-shot as attempted before its
+send succeeds, so replay after send failure may require restarting beat. No
+custom polling or retry-execution loop is added; native recovery semantics remain,
+without exactly-once delivery or distributed multi-beat election.
+
+The shared runtime opens its source for the first active worker/beat owner in a
+process and closes it for the last. Startup failures attempt cleanup; beat
+shutdown attempts every broker and releases its source even when a broker fails.
+A producer connection does not open worker retry resources. With no runtime,
+policy tasks can still be registered and published; a worker with an actionable
+retry policy rejects missing configuration before processing tasks. A policy
+with `attempts=1` requires no retry resources. Invalid policy/source shapes and
+conflicting middleware are still rejected during assembly. Task registration
+after worker startup must satisfy that worker's existing retry configuration.
+
+### Immediate execution and existing factories
+
+For zero-delay retry without a source or beat, explicitly select
+`RetryRuntime.immediate()` during assembly. Positive delays and `Backoff` are
+rejected in that mode; they are never silently ignored. Scheduled mode still
+uses source/beat even for `delay=0`, preserving one explicit execution choice.
+
+Existing `create_broker(retry_source=source)` and
+`create_beat(broker, sources=[source])` remain available for one broker. Supplying
+both `retry` and `retry_source` is an error. Avoid independent beats reading the
+same source, including an ordinary scheduler beat and the shared retry beat.
+Keep ordinary schedule storage separate, or let one correctly routed beat own
+all entries in that source. Label-based recurring defaults remain explicitly
+selected through their existing source API.
+
+Configured Redis scheduler/projection `create_app(..., retry=retry)` factories
+also accept the common runtime. The scheduler's `app.scheduler` then owns only
+its ordinary schedule source and label defaults; the projection's scheduler has
+no sources. Run the explicit shared `retry_beat` for retries. If the runtime is
+omitted, these convenience factories keep their previous per-app retry source
+and beat setup. Ordinary scheduler storage and Redis results retain their own
+settings, independent of the selected retry source.
+
+This policy retries execution errors, not failed producer publication. Native
+result handling retains the final attempt outcome. Publication hooks observe
+submission separately; final-failure hooks remain outside this API.
 
 ## Sources and lifecycle
 
@@ -668,8 +733,9 @@ Create one source per application/process, using the same Redis database and
 prefix in the producer and beat. An ordinary Dishka APP provider can own the
 instance; no source provider is registered automatically. Keep using native
 startup/shutdown in the owning application; the beat CLI calls these for its
-sources. This adapter preserves native lifecycle behavior, including upstream
-limitations; it does not add pool management or startup-failure cleanup.
+sources. The Redis adapter disconnects its connection pool on shutdown. Native
+storage limitations remain; the shared retry runtime coordinates source ownership
+and startup-failure cleanup when selected.
 
 Use these classmethods after registering the scheduler:
 
@@ -909,9 +975,28 @@ class defaults, native beat and `Retry` policies use the same source contracts.
 Use `MemorySource` only when that source and its consumers share one process;
 separate worker/beat processes need an explicitly configured shared source such
 as `RedisSource` (install the corresponding `scheduler-redis` or
-`projection-redis` extra too). Include the configured retry source in beat's
-sources and run beat for retry dispatch. Task results likewise require an
-explicit native result backend when they must cross processes.
+`projection-redis` extra too). For scheduled retries, include the configured
+source in beat's sources and run beat for retry dispatch. Immediate mode needs
+no source or beat. Task results likewise require an explicit native result backend
+when they must cross processes.
+
+## Redis storage and retention
+
+Redis task streams, task results and schedule sources have different cleanup
+rules. In taskiq-redis 1.2.3, Redis Streams acknowledgement performs `XACK`;
+it removes the pending acknowledgement entry, not the stream record. Native
+`RedisStreamBroker` defaults `maxlen=None`, so acknowledged records can accumulate.
+The broker adapter accepts native `maxlen`/`approximate` options, but selecting a
+length limit is a retention decision: trimming can remove work still needed by
+slow consumers or other groups. Papilio does not add unconditional `XDEL` or an
+arbitrary stream limit.
+
+The configured Redis result backend uses `RedisSettings.result_ttl`; a separately
+configured native backend needs its own expiration policy. This result TTL does
+not trim broker streams or expire schedule entries. A successfully dispatched
+one-shot retry uses the source's native `post_send` cleanup; a failed send keeps
+the schedule. Future schedules and recurring declarations must not be expired
+merely to reduce memory use. A custom source owns its own cleanup semantics.
 
 ## Signatures and boundaries
 
@@ -919,8 +1004,17 @@ Task callbacks preserve `run` parameter kinds, defaults and annotations without
 `self`. Dishka adds its internal keyword dependency; `_job` and `dishka_container`
 are reserved and must not be sent as task kwargs. Native Taskiq handles payload
 conversion. Its mixed untyped/typed and variadic conversion limitations still
-apply; this adapter does not add a parser or make coercion strict. The convenience
-`enqueue` method does not provide static per-run argument typing.
+apply; this adapter does not add a parser or make coercion strict.
+
+`Scheduler.enqueue` statically checks arguments against the concrete `run`
+signature, including defaults, keyword-only and positional-only parameters,
+variadic arguments and inherited methods. Its native `AsyncTaskiqTask[R]` handle
+preserves `run`'s result type. Type inference requires annotations on `run` and
+is verified with the project's declared Pyright version. Runtime payload
+conversion is unchanged: for `run(payload: Payload)`, pass a `Payload` instance
+to satisfy the type checker, even when Taskiq can also coerce a dictionary at
+runtime. `task()`, `at`, `cron` and `every` retain their existing broad argument
+types.
 
 CLI implementations live together in `papilio_tasks/cli/`: `main.py` routes
 commands and `taskiq.py` delegates worker/beat execution for both applications.
@@ -1323,9 +1417,10 @@ Retry is opt-in: `Projection.retry` defaults to `None`. For ordinary queued
 projections without retry, run the producer and worker; no retry source or beat
 is required. Publication hooks also work without beat.
 
-To enable retry, select a class policy, explicitly supply `retry_source`, and
-run beat to dispatch scheduled attempts. Beat is not started automatically by
-`create_broker`, `create_beat` or `enqueue`; `create_beat` only constructs its
+For scheduled retry, select a class policy, explicitly supply `retry_source` or
+a shared `RetryRuntime`, and run beat to dispatch scheduled attempts. Immediate
+mode is described in [Retry policies](#retry-policies). Beat is not started
+automatically by `create_broker`, `create_beat` or `enqueue`; `create_beat` only constructs its
 configuration. One beat can serve multiple projections registered on its broker
 and using its configured sources; there is no beat per Projection.
 
@@ -1373,12 +1468,13 @@ current retry path always writes the next attempt to the source. Beat later
 publishes eligible attempts; the worker executes them. An attempt limit of one
 or a nonmatching exception does not schedule another attempt.
 
-Missing `retry_source` for a configured policy is rejected during assembly.
+Missing retry execution configuration for an actionable policy is rejected
+before worker readiness; producer registration does not require a retry source.
 The factory does not check whether a separate beat process is running; running
 and monitoring it is the application's deployment responsibility. Separate
 processes must use shared source storage, not separate `MemorySource` instances.
 
-Manual inclusion and discovery both validate the policy/source. Native Taskiq
+Manual inclusion and discovery both validate policy shapes. Native Taskiq
 SmartRetry preserves the task ID, arguments and queue, applies the exception
 filter and attempt limit, and schedules the next attempt after the configured
 delay. Initial publication is not delayed. Each attempt resolves a fresh Dishka

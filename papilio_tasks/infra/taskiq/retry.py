@@ -1,22 +1,45 @@
-"""Adapt retry settings and manage the worker's schedule source."""
+"""Map policies to native labels and Taskiq retry execution."""
 
-from collections.abc import Iterable
+from copy import copy
 from typing import Any
 
-from taskiq import AsyncBroker, TaskiqEvents, TaskiqMessage, TaskiqState
-from taskiq.middlewares import SimpleRetryMiddleware, SmartRetryMiddleware
+from taskiq import AsyncBroker, TaskiqMessage
+from taskiq.kicker import AsyncKicker
+from taskiq.middlewares import SmartRetryMiddleware
 
-from papilio_tasks.tools.retry import Retry
-
-from .sources.contracts.base import MutableSourceContract
+from papilio_tasks.tools.retry import Backoff, Retry
 
 
 class _Retry(SmartRetryMiddleware):
     def make_delay(self, message: TaskiqMessage, retries: int) -> float:
         # Native `delay` also delays RabbitMQ publication, including attempt 1.
         if "retry_delay" in message.labels:
-            return float(message.labels["retry_delay"])
+            labels = message.labels
+            if "retry_multiplier" in labels:
+                jitter = labels.get("retry_jitter", False)
+                return Backoff(
+                    initial=float(labels["retry_delay"]),
+                    multiplier=float(labels["retry_multiplier"]),
+                    max_delay=float(labels["retry_max_delay"]),
+                    jitter=str(jitter).lower() == "true",
+                ).at(retries)
+            # Adapt only the calculation; never publish Rabbit's delay label.
+            adapted = copy(message)
+            adapted.labels = labels | {"delay": labels["retry_delay"]}
+            return super().make_delay(adapted, retries)
         return super().make_delay(message, retries)
+
+    async def on_send(
+        self,
+        kicker: AsyncKicker[Any, Any],
+        message: TaskiqMessage,
+        delay: float,
+    ) -> None:
+        if self.schedule_source is None:
+            # Explicit immediate mode uses native republication, with no delay.
+            await kicker.kiq(*message.args, **message.kwargs)
+        else:
+            await super().on_send(kicker, message, delay)
 
 
 def retry_labels(
@@ -30,17 +53,35 @@ def retry_labels(
         return metadata
     if not isinstance(policy, Retry):
         raise TypeError("retry must be Retry or None")
-    if (
-        "papilio_retry_source" in broker.state
-        and broker.state.papilio_retry_source is None
+    if policy.attempts > 1 and broker.state.get(
+        "papilio_retry_worker_ready", False
     ):
-        raise ValueError("Select retry_source before including a retry job")
+        runtime = broker.state.get("papilio_retry_runtime")
+        if runtime is None:
+            raise ValueError("Worker retry requires a RetryRuntime")
+        runtime.check_policy(policy)
     settings = {
         "retry_on_error": True,
         "max_retries": policy.attempts,
-        "retry_delay": policy.delay,
+        "retry_delay": (
+            policy.delay.initial
+            if isinstance(policy.delay, Backoff)
+            else policy.delay
+        ),
         "types_of_exceptions": policy.errors,
     }
+    if isinstance(policy.delay, Backoff):
+        settings.update(
+            retry_multiplier=policy.delay.multiplier,
+            retry_max_delay=policy.delay.max_delay,
+            retry_jitter=policy.delay.jitter,
+        )
+    elif {
+        "retry_multiplier",
+        "retry_max_delay",
+        "retry_jitter",
+    } & metadata.keys():
+        raise ValueError("Backoff labels conflict with a fixed retry policy")
     reserved = {"_retries", "delay"} & metadata.keys()
     if reserved:
         names = ", ".join(sorted(reserved))
@@ -54,65 +95,3 @@ def retry_labels(
             )
     metadata.update(settings)
     return metadata
-
-
-def validate_retry(
-    broker: AsyncBroker,
-    source: MutableSourceContract | None,
-    policies: Iterable[Retry | None],
-) -> None:
-    """Check discovered and pre-included jobs before changing the broker."""
-    required = False
-    for policy in policies:
-        if policy is None:
-            continue
-        if not isinstance(policy, Retry):
-            raise TypeError("retry must be Retry or None")
-        required = True
-
-    if source is None:
-        required = required or any(
-            "retry_delay" in task.labels
-            and str(task.labels.get("retry_on_error", False)).lower() == "true"
-            for task in broker.local_task_registry.values()
-        )
-        if required:
-            raise ValueError("Retry jobs require an explicit retry_source")
-        return
-
-    if not isinstance(source, MutableSourceContract):
-        raise TypeError("retry_source must be a writable source")
-    for middleware in broker.middlewares:
-        if isinstance(
-            middleware, (SimpleRetryMiddleware, SmartRetryMiddleware)
-        ):
-            raise ValueError("Broker already has a retry middleware")
-
-
-def setup_retry(
-    broker: AsyncBroker, source: MutableSourceContract | None
-) -> None:
-    """Install native retries; worker events own this process's source."""
-    broker.state.papilio_retry_source = source
-    if source is None:
-        return
-    broker.add_middlewares(
-        _Retry(schedule_source=source.native, default_retry_label=False)
-    )
-    started = False
-
-    @broker.on_event(TaskiqEvents.WORKER_STARTUP)
-    async def start_source(state: TaskiqState) -> None:
-        nonlocal started
-        if started or broker.is_scheduler_process:
-            return
-        await source.native.startup()
-        started = True
-
-    @broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
-    async def stop_source(state: TaskiqState) -> None:
-        nonlocal started
-        if not started:
-            return
-        started = False
-        await source.native.shutdown()

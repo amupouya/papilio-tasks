@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 — 2026-11-16
+
+### Added
+
+- Shared Taskiq `RetryRuntime` for schedulers and projections, with an explicit
+  native-loop retry beat that routes a shared writable source to each task's
+  registered broker. Includes source lifecycle ownership and immediate mode.
+- Immutable capped `Backoff` policies with optional full jitter, retaining fixed
+  delays, native attempt/error handling and initial publication behavior.
+- Scheduler `enqueue` arguments and native result types inferred from `run`.
+
+### Changed
+
+- Missing retry execution resources are checked before worker readiness;
+  producer registration and single-attempt policies do not require a source.
+  Existing `retry_source` and single-broker beat factories remain available.
+- Configured Redis applications accept a shared runtime without creating
+  additional readers of its retry source. Redis stream retention remains an
+  explicit native transport choice; no automatic stream deletion is added.
+
 ## 1.1.0 — 2026-10-30
 
 ### Added

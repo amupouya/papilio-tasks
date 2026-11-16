@@ -3,12 +3,14 @@
 from collections.abc import Sequence
 
 from dishka import Provider
+from taskiq import TaskiqScheduler
 from taskiq_redis import RedisAsyncResultBackend
 
 from papilio_tasks.apps.lifecycle import Producer, Producers
 from papilio_tasks.apps.taskiq import (
     Application,
     RedisSettings,
+    RetryRuntime,
     worker_producers,
 )
 from papilio_tasks.infra.taskiq.sources.backends.redis import RedisSource
@@ -28,10 +30,15 @@ def create_app(
     modules: Sequence[str] = (),
     producers: Sequence[Producer] = (),
     publish_hooks: type[PublishHooks] | None = None,
+    retry: RetryRuntime | None = None,
 ) -> Application:
     """Build a projection worker and retry beat without connecting."""
     dependencies = Producers(*producers)
-    source = RedisSource(settings.url, prefix=settings.schedule_prefix)
+    source = (
+        RedisSource(settings.url, prefix=settings.schedule_prefix)
+        if retry is None
+        else None
+    )
     transport = RedisStreamBroker(
         settings.url,
         queue_name=settings.queue_name,
@@ -50,7 +57,14 @@ def create_app(
         providers=providers,
         modules=modules,
         retry_source=source,
+        retry=retry,
         publish_hooks=publish_hooks,
     )
     worker_producers(broker, dependencies)
-    return Application(broker, create_beat(broker, sources=[source]))
+    # A shared runtime's retry source is consumed by its explicit shared beat.
+    beat = (
+        create_beat(broker, sources=[source])
+        if source is not None
+        else TaskiqScheduler(broker, sources=[])
+    )
+    return Application(broker, beat)

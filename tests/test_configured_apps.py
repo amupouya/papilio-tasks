@@ -8,7 +8,8 @@ from papilio_tasks.apps.events.rabbit import create_app as rabbit_app
 from papilio_tasks.apps.lifecycle import Producers
 from papilio_tasks.apps.projections.redis import create_app as projection_app
 from papilio_tasks.apps.schedulers.redis import create_app as scheduler_app
-from papilio_tasks.apps.taskiq import RedisSettings
+from papilio_tasks.apps.taskiq import RedisSettings, RetryRuntime
+from papilio_tasks.infra.taskiq.sources.backends.memory import MemorySource
 
 
 @pytest.mark.parametrize(
@@ -39,6 +40,23 @@ async def test_assembly_is_lazy_and_beat_uses_worker_retry_source(
         dependency.stop.assert_not_awaited()
     finally:
         await app.stop()
+
+
+async def test_configured_apps_leave_shared_retry_source_for_its_one_beat():
+    runtime = RetryRuntime(source=MemorySource())
+    settings = RedisSettings(
+        url="redis://127.0.0.1:1/0",
+        queue_name="test-jobs",
+        schedule_prefix="ordinary-schedules",
+    )
+    jobs = scheduler_app(settings, retry=runtime)
+    projects = projection_app(settings, retry=runtime)
+    beat = runtime.create_beat(brokers=[jobs.broker, projects.broker])
+    assert len(beat.sources) == 1
+    assert len(jobs.scheduler.sources) == 2
+    assert projects.scheduler.sources == []
+    assert runtime.source.native not in jobs.scheduler.sources
+    await asyncio.gather(jobs.stop(), projects.stop())
 
 
 @pytest.mark.parametrize(

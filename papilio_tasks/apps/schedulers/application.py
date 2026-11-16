@@ -8,7 +8,12 @@ from dishka.integrations.taskiq import TaskiqProvider, setup_dishka
 from taskiq import AsyncBroker, TaskiqEvents, TaskiqScheduler, TaskiqState
 
 from papilio_tasks.infra.taskiq import bindings
-from papilio_tasks.infra.taskiq.retry import setup_retry, validate_retry
+from papilio_tasks.infra.taskiq.retry_runtime import (
+    RetryRuntime,
+    install_retry,
+    prepare_retry,
+    release_retry,
+)
 from papilio_tasks.infra.taskiq.sources.contracts.base import (
     MutableSourceContract,
     SourceContract,
@@ -25,12 +30,14 @@ def create_broker(
     providers: Sequence[Provider] = (),
     modules: Sequence[str] = (),
     retry_source: MutableSourceContract | None = None,
+    retry: RetryRuntime | None = None,
 ) -> AsyncBroker:
     """Register discovered schedulers and wire per-job Dishka injection.
 
     Providers own scheduler construction and scope. Assembly performs no
     network I/O. The returned native broker owns application startup/shutdown.
-    Retry policies require a writable retry_source, also consumed by beat.
+    Configure retry with retry or the compatible retry_source keyword.
+    Workers validate required retry resources before processing tasks.
     """
     registry = registrar if registrar is not None else Registrar()
     broker = registry.broker.native
@@ -39,7 +46,9 @@ def create_broker(
 
     try:
         classes = Bootstrapper(modules).classes("schedulers", Scheduler)
-        validate_retry(broker, retry_source, (cls.retry for cls in classes))
+        runtime = prepare_retry(
+            broker, retry, retry_source, (cls.retry for cls in classes)
+        )
         container = make_async_container(TaskiqProvider(), *providers)
         for cls in classes:
             registry.include(cls)
@@ -53,9 +62,12 @@ def create_broker(
             try:
                 await container.close()
             finally:
-                bindings.release(broker)
+                try:
+                    await release_retry(broker)
+                finally:
+                    bindings.release(broker)
 
-        setup_retry(broker, retry_source)
+        install_retry(broker, runtime)
     except Exception:
         bindings.release(broker)
         raise

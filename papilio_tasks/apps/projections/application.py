@@ -7,7 +7,12 @@ from dishka.integrations.taskiq import TaskiqProvider, setup_dishka
 from taskiq import AsyncBroker, TaskiqEvents, TaskiqScheduler, TaskiqState
 
 from papilio_tasks.infra.taskiq import bindings
-from papilio_tasks.infra.taskiq.retry import setup_retry, validate_retry
+from papilio_tasks.infra.taskiq.retry_runtime import (
+    RetryRuntime,
+    install_retry,
+    prepare_retry,
+    release_retry,
+)
 from papilio_tasks.infra.taskiq.sources.contracts.base import (
     MutableSourceContract,
     SourceContract,
@@ -25,6 +30,7 @@ def create_broker(
     providers: Sequence[Provider] = (),
     modules: Sequence[str] = (),
     retry_source: MutableSourceContract | None = None,
+    retry: RetryRuntime | None = None,
     publish_hooks: type[PublishHooks] | None = None,
 ) -> AsyncBroker:
     """Discover projections and attach one container to the native broker.
@@ -32,7 +38,8 @@ def create_broker(
     Providers own Projection and hook construction. Assembly opens no network
     resources. Callers own native broker startup/shutdown; shutdown also closes
     the container. Pre-included tasks are retained.
-    Retry policies require an explicit writable source, also consumed by beat.
+    Configure retry with retry or the compatible retry_source keyword.
+    Workers validate required retry resources before processing tasks.
     """
     registry = registrar if registrar is not None else Registrar()
     broker = registry.broker.native
@@ -48,7 +55,9 @@ def create_broker(
                 "publish_hooks must be a PublishHooks class or None"
             )
         classes = Bootstrapper(modules).classes("projections", Projection)
-        validate_retry(broker, retry_source, (cls.retry for cls in classes))
+        runtime = prepare_retry(
+            broker, retry, retry_source, (cls.retry for cls in classes)
+        )
         for cls in classes:
             registry.include(cls)
         container = make_async_container(TaskiqProvider(), *providers)
@@ -63,9 +72,12 @@ def create_broker(
             try:
                 await container.close()
             finally:
-                bindings.release(broker)
+                try:
+                    await release_retry(broker)
+                finally:
+                    bindings.release(broker)
 
-        setup_retry(broker, retry_source)
+        install_retry(broker, runtime)
     except Exception:
         bindings.release(broker)
         raise

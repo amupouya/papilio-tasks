@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from taskiq import AsyncTaskiqTask
 from taskiq.decor import AsyncTaskiqDecoratedTask
@@ -13,7 +13,7 @@ from papilio_tasks.infra.taskiq.sources.contracts.base import (
 )
 from papilio_tasks.tools.retry import Retry
 
-from .contracts import SchedulerContract
+from .contracts import SchedulerContract, _EnqueueTarget
 
 
 class Scheduler(SchedulerContract, ABC):
@@ -31,8 +31,11 @@ class Scheduler(SchedulerContract, ABC):
         return bindings.get(cls)
 
     @classmethod
-    async def enqueue(cls, *args: Any, **kwargs: Any) -> AsyncTaskiqTask:
-        return await cls.task().kiq(*args, **kwargs)
+    async def enqueue[**P, R](
+        cls: type[_EnqueueTarget[P, R]], *args: P.args, **kwargs: P.kwargs
+    ) -> AsyncTaskiqTask[R]:
+        # Registration erases types; run supplies the native result type.
+        return cast(AsyncTaskiqTask[R], await cls.task().kiq(*args, **kwargs))
 
     @classmethod
     async def at(

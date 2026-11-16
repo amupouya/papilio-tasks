@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from dishka import Provider, Scope
 from hook_support import handler
+from taskiq import AsyncBroker
 from taskiq.cli.scheduler.run import SchedulerLoop
 from taskiq.exceptions import SendTaskError
 from taskiq.middlewares import SimpleRetryMiddleware
@@ -61,19 +62,24 @@ def test_inherited_disabled_and_conflicting_policies():
     assert beat.sources == [source.native]
 
 
-def test_preincluded_retry_requires_source_and_cleans_binding():
+async def test_preincluded_retry_validates_worker_and_cleans_binding():
     registry = Registrar()
     registry.include(Product)
     before = dict(registry.broker.native.local_task_registry)
+    broker = create_broker(registrar=registry)
+    assert broker.local_task_registry == before
+    assert Product.task() is not None
+    broker.is_worker_process = True
     with pytest.raises(ValueError, match="retry_source"):
-        create_broker(registrar=registry)
-    assert registry.broker.native.local_task_registry == before
-    assert "papilio_container" not in registry.broker.native.state
+        await AsyncBroker.startup(broker)
+    await AsyncBroker.shutdown(broker)
     with pytest.raises(RuntimeError, match="not included"):
         Product.task()
 
 
-def test_discovery_checks_source_before_registering(tmp_path, monkeypatch):
+async def test_discovery_checks_source_before_worker_startup(
+    tmp_path, monkeypatch
+):
     name = "projection_retry_" + uuid4().hex
     package = tmp_path / name
     package.mkdir()
@@ -88,9 +94,13 @@ def test_discovery_checks_source_before_registering(tmp_path, monkeypatch):
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     registry = Registrar()
+    client = create_broker(registrar=registry, modules=[name])
+    assert len(client.local_task_registry) == 1
+    client.is_worker_process = True
     with pytest.raises(ValueError, match="retry_source"):
-        create_broker(registrar=registry, modules=[name])
-    assert not registry.broker.native.local_task_registry
+        await AsyncBroker.startup(client)
+    await AsyncBroker.shutdown(client)
+    registry = Registrar()
     broker = create_broker(
         registrar=registry, modules=[name], retry_source=MemorySource()
     )
@@ -99,7 +109,7 @@ def test_discovery_checks_source_before_registering(tmp_path, monkeypatch):
     assert cls.task().labels["max_retries"] == 2
 
 
-def test_invalid_source_duplicate_middleware_and_late_inclusion():
+async def test_invalid_source_duplicate_middleware_and_late_inclusion():
     with pytest.raises(TypeError, match="writable"):
         create_broker(retry_source=Source(MemorySource().native))
     registry = Registrar()
@@ -108,13 +118,17 @@ def test_invalid_source_duplicate_middleware_and_late_inclusion():
         create_broker(registrar=registry, retry_source=MemorySource())
     assert "papilio_container" not in registry.broker.native.state
     registry = Registrar()
-    create_broker(registrar=registry)
-    with pytest.raises(ValueError, match="retry_source"):
+    broker = create_broker(registrar=registry)
+    broker.is_worker_process = True
+    await AsyncBroker.startup(broker)
+    with pytest.raises(ValueError, match="retry"):
         registry.include(Product)
     assert not registry.broker.native.local_task_registry
+    await AsyncBroker.shutdown(broker)
     ready = Registrar()
-    create_broker(registrar=ready, retry_source=MemorySource())
+    configured = create_broker(registrar=ready, retry_source=MemorySource())
     assert ready.include(Product).labels["retry_on_error"]
+    await configured.shutdown()
 
 
 @pytest.mark.parametrize(

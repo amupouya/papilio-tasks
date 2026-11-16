@@ -10,10 +10,207 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from redis import Redis as SyncRedis
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("TEST_REDIS_URL"), reason="No test Redis"
 )
+
+
+def test_one_retry_beat_routes_two_native_worker_processes(tmp_path):
+    package = tmp_path / "shared_retry"
+    package.mkdir()
+    (package / "__init__.py").touch()
+    (package / "tasks.py").write_text(
+        textwrap.dedent(r"""
+        import os
+        from pathlib import Path
+        from dishka import Provider, Scope
+        from taskiq import TaskiqEvents
+        from papilio_tasks.apps.taskiq import RetryRuntime
+        from papilio_tasks.tools.retry import Retry
+        from papilio_tasks.infra.taskiq.sources.backends.redis import (
+            RedisSource,
+        )
+        from papilio_tasks.apps.schedulers.backends.redis import (
+            RedisScheduler, RedisStreamBroker,
+        )
+        from papilio_tasks.apps.schedulers.registry.redis import RedisRegistrar
+        from papilio_tasks.apps.schedulers.application import create_broker
+        from papilio_tasks.apps.projections.backends.redis import RedisDirect
+        from papilio_tasks.apps.projections.registry.redis import (
+            RedisRegistrar as Projects,
+        )
+        from papilio_tasks.apps.projections.application import (
+            create_broker as create_projection,
+        )
+
+        def record(value):
+            with Path(os.environ['RETRY_EVENTS']).open('a') as output:
+                output.write(value + '\n')
+
+        class Job(RedisScheduler):
+            retry = Retry(attempts=2, delay=0, errors=(ConnectionError,))
+            attempts = 0
+            async def run(self, value: int) -> int:
+                type(self).attempts += 1
+                if self.attempts == 1:
+                    raise ConnectionError('temporary')
+                record('done:job:' + str(value))
+                return value
+
+        class Project(RedisDirect[int, int]):
+            retry = Job.retry
+            attempts = 0
+            def __init__(self):
+                super().__init__()
+            async def read(self, value: int) -> int:
+                return value
+            async def write(self, data: int) -> int:
+                type(self).attempts += 1
+                if self.attempts == 1:
+                    raise ConnectionError('temporary')
+                record('done:project:' + str(data))
+                return data
+
+        prefix = os.environ['RETRY_PREFIX']
+        source = RedisSource(
+            os.environ['TEST_REDIS_URL'], prefix=prefix+'-plans',
+        )
+        native_start = source.native.startup
+        native_stop = source.native.shutdown
+        async def opening():
+            await native_start()
+            record('source_open:' + os.environ.get('RETRY_ROLE', 'publisher'))
+        async def closing():
+            await native_stop()
+            record('source_close:' + os.environ.get('RETRY_ROLE', 'publisher'))
+        source.native.startup, source.native.shutdown = opening, closing
+        runtime = RetryRuntime(source=source)
+        provider = Provider(scope=Scope.REQUEST)
+        provider.provide(Job)
+        provider.provide(Project)
+        jobs = RedisRegistrar(RedisStreamBroker(
+            os.environ['TEST_REDIS_URL'], queue_name=prefix+'-jobs',
+            consumer_group_name=prefix+'-jobs', consumer_id='0',
+        ))
+        projects = Projects(RedisStreamBroker(
+            os.environ['TEST_REDIS_URL'], queue_name=prefix+'-projects',
+            consumer_group_name=prefix+'-projects', consumer_id='0',
+        ))
+        jobs.include(Job)
+        projects.include(Project)
+        first = create_broker(
+            registrar=jobs, providers=[provider], retry=runtime,
+        )
+        second = create_projection(
+            registrar=projects, providers=[provider], retry=runtime,
+        )
+        @first.on_event(TaskiqEvents.WORKER_STARTUP)
+        async def job_ready(state): record('ready:job')
+        @second.on_event(TaskiqEvents.WORKER_STARTUP)
+        async def project_ready(state): record('ready:project')
+        beat = runtime.create_beat(brokers=[first, second])
+    """)
+    )
+    prefix = "shared-cli-" + uuid4().hex
+    events = tmp_path / "shared-events.txt"
+    env = {
+        **os.environ,
+        "RETRY_PREFIX": prefix,
+        "RETRY_EVENTS": str(events),
+        "PYTHONPATH": os.pathsep.join(
+            [str(tmp_path), os.environ.get("PYTHONPATH", "")]
+        ),
+    }
+    processes, logs = [], []
+
+    def start(command, target, role, *options):
+        log = (tmp_path / (role + ".log")).open("w+")
+        logs.append(log)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "papilio_tasks",
+                "scheduler",
+                command,
+                "shared_retry.tasks:" + target,
+                "--app-dir",
+                str(tmp_path),
+                *options,
+            ],
+            env=env | {"RETRY_ROLE": role},
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        processes.append(process)
+
+    def wait_for(value):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            output = "\n".join(Path(log.name).read_text() for log in logs)
+            assert all(p.poll() is None for p in processes), output
+            if events.exists() and value in events.read_text().splitlines():
+                return
+            time.sleep(0.05)
+        pytest.fail("Missing " + value + ": " + output)
+
+    try:
+        start("worker", "first", "jobs", "--workers", "1")
+        start("worker", "second", "projects", "--workers", "1")
+        wait_for("ready:job")
+        wait_for("ready:project")
+        start("beat", "beat", "beat", "--update-interval", "1")
+        wait_for("source_open:beat")
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                textwrap.dedent("""
+                import asyncio
+                from shared_retry.tasks import Job, Project, first, second
+                async def publish():
+                    await asyncio.gather(first.startup(), second.startup())
+                    try:
+                        await asyncio.gather(
+                            Job.enqueue(41), Project.enqueue(42),
+                        )
+                    finally:
+                        await asyncio.gather(
+                            first.shutdown(), second.shutdown(),
+                        )
+                asyncio.run(publish())
+            """),
+            ],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        wait_for("done:job:41")
+        wait_for("done:project:42")
+    finally:
+        for process in reversed(processes):
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        for log in logs:
+            log.close()
+        with SyncRedis.from_url(env["TEST_REDIS_URL"]) as redis:
+            keys = list(redis.scan_iter("*" + prefix + "*"))
+            if keys:
+                redis.delete(*keys)
+    recorded = events.read_text().splitlines()
+    for role in ("jobs", "projects", "beat"):
+        assert recorded.count("source_open:" + role) == 1
+        assert recorded.count("source_close:" + role) == 1
+    assert "source_open:publisher" not in recorded
 
 
 @pytest.mark.parametrize("source_kind", ["memory", "redis", "retry"])

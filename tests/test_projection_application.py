@@ -411,7 +411,16 @@ def test_class_api_types_preserve_decorated_function_and_native_result(
         )
     )
     checked = subprocess.run(
-        [sys.executable, "-m", "pyright", "-p", str(config), "--outputjson"],
+        [
+            sys.executable,
+            "-m",
+            "pyright",
+            "--pythonpath",
+            sys.executable,
+            "-p",
+            str(config),
+            "--outputjson",
+        ],
         capture_output=True,
         text=True,
         timeout=60,

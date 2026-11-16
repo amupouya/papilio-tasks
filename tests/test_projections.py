@@ -367,7 +367,16 @@ def test_projection_type_contracts(tmp_path):
         )
     )
     result = subprocess.run(
-        [sys.executable, "-m", "pyright", "-p", str(config), "--outputjson"],
+        [
+            sys.executable,
+            "-m",
+            "pyright",
+            "--pythonpath",
+            sys.executable,
+            "-p",
+            str(config),
+            "--outputjson",
+        ],
         capture_output=True,
         text=True,
         timeout=60,

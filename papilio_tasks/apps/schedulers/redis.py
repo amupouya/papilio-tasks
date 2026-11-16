@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from dishka import Provider
-from taskiq import ScheduledTask
+from taskiq import ScheduledTask, TaskiqScheduler
 from taskiq.schedule_sources import LabelScheduleSource
 from taskiq_redis import RedisAsyncResultBackend
 
@@ -12,6 +12,7 @@ from papilio_tasks.apps.lifecycle import Producer, Producers
 from papilio_tasks.apps.taskiq import (
     Application,
     RedisSettings,
+    RetryRuntime,
     worker_producers,
 )
 from papilio_tasks.infra.taskiq.sources.backends.redis import RedisSource
@@ -50,6 +51,7 @@ def create_app(
     providers: Sequence[Provider] = (),
     modules: Sequence[str] = (),
     producers: Sequence[Producer] = (),
+    retry: RetryRuntime | None = None,
 ) -> SchedulerApplication:
     """Build worker and beat without opening connections."""
     dependencies = Producers(*producers)
@@ -71,10 +73,16 @@ def create_app(
         registrar=RedisRegistrar(transport),
         providers=providers,
         modules=modules,
-        retry_source=source,
+        retry_source=source if retry is None else None,
+        retry=retry,
     )
     worker_producers(broker, dependencies)
-    scheduler = create_beat(
-        broker, sources=[source, Source(LabelScheduleSource(broker))]
+    sources = [source, Source(LabelScheduleSource(broker))]
+    # An explicit runtime has its own shared retry beat. This beat owns only
+    # this application's ordinary schedules and declared defaults.
+    scheduler = (
+        create_beat(broker, sources=sources)
+        if retry is None
+        else TaskiqScheduler(broker, sources=[item.native for item in sources])
     )
     return SchedulerApplication(broker, scheduler, settings, source)

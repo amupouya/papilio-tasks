@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 from dishka import Provider, Scope
-from taskiq import ScheduleSource, TaskiqEvents
+from taskiq import AsyncBroker, ScheduleSource, TaskiqEvents
 from taskiq.cli.scheduler.run import SchedulerLoop
 from taskiq.middlewares import SimpleRetryMiddleware, SmartRetryMiddleware
 from taskiq.receiver import Receiver
@@ -114,7 +114,7 @@ Retry(attempts=1, delay=0, errors=(ValueError,))
 
 
 @pytest.mark.parametrize("kind", ["memory", "rabbit", "redis"])
-def test_policy_inheritance_labels_and_missing_source(kind):
+async def test_policy_inheritance_labels_and_missing_source(kind):
     base, registry = registration(kind)
 
     class Parent(base):
@@ -138,10 +138,16 @@ def test_policy_inheritance_labels_and_missing_source(kind):
     disabled = registry.include(Disabled)
     assert not disabled.labels.get("retry_on_error", False)
     before = dict(registry.broker.native.local_task_registry)
+    client = create_broker(registrar=registry)
+    assert client.local_task_registry == before
+    await AsyncBroker.startup(client)
+    client.is_worker_process = True
     with pytest.raises(ValueError, match="retry_source"):
-        create_broker(registrar=registry)
-    assert registry.broker.native.local_task_registry == before
-    assert "papilio_container" not in registry.broker.native.state
+        await AsyncBroker.startup(client)
+    await AsyncBroker.shutdown(client)
+    _, registry = registration(kind)
+    registry.include(Child)
+    registry.include(Disabled)
     source = MemorySource()
     broker = create_broker(registrar=registry, retry_source=source)
     middleware = [
@@ -155,7 +161,7 @@ def test_policy_inheritance_labels_and_missing_source(kind):
 
 
 @pytest.mark.parametrize("kind", ["memory", "rabbit", "redis"])
-def test_discovery_validates_retry_before_registration(
+async def test_discovery_validates_retry_before_worker_startup(
     kind, tmp_path, monkeypatch
 ):
     base, registry = registration(kind)
@@ -172,9 +178,13 @@ def test_discovery_validates_retry_before_registration(
         "    async def run(self): pass\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
+    client = create_broker(registrar=registry, modules=[name])
+    assert len(client.local_task_registry) == 2
+    client.is_worker_process = True
     with pytest.raises(ValueError, match="retry_source"):
-        create_broker(registrar=registry, modules=[name])
-    assert not registry.broker.native.local_task_registry
+        await AsyncBroker.startup(client)
+    await AsyncBroker.shutdown(client)
+    _, registry = registration(kind)
     broker = create_broker(
         registrar=registry, modules=[name], retry_source=MemorySource()
     )
@@ -183,7 +193,7 @@ def test_discovery_validates_retry_before_registration(
     assert cls.task().labels["max_retries"] == 2
 
 
-def test_readonly_source_duplicate_retry_and_late_registration():
+async def test_readonly_source_duplicate_retry_and_late_registration():
     with pytest.raises(TypeError, match="writable"):
         create_broker(retry_source=Source(MemorySource().native))
     registry = Registrar()
@@ -192,7 +202,9 @@ def test_readonly_source_duplicate_retry_and_late_registration():
         create_broker(registrar=registry, retry_source=MemorySource())
     assert "papilio_container" not in registry.broker.native.state
     registry = Registrar()
-    create_broker(registrar=registry)
+    broker = create_broker(registrar=registry)
+    broker.is_worker_process = True
+    await AsyncBroker.startup(broker)
 
     class Report(Scheduler):
         retry = Retry(attempts=2, delay=0, errors=(ValueError,))
@@ -200,9 +212,10 @@ def test_readonly_source_duplicate_retry_and_late_registration():
         async def run(self):
             pass
 
-    with pytest.raises(ValueError, match="retry_source"):
+    with pytest.raises(ValueError, match="retry"):
         registry.include(Report)
     assert not registry.broker.native.local_task_registry
+    await AsyncBroker.shutdown(broker)
 
 
 @pytest.mark.parametrize("role", ["worker", "producer", "beat"])
@@ -228,8 +241,6 @@ async def test_source_lifecycle_has_one_owner(role, app):
 
     source = MutableSource(Native())
     # Exercise native event dispatch without making a network connection.
-    from taskiq import AsyncBroker
-
     if app == "projection":
         from papilio_tasks.apps.projections.application import (
             create_broker as factory,
