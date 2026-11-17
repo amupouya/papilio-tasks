@@ -7,7 +7,6 @@ from papilio_tasks.infra.faststream.brokers.contracts.redis import (
     RedisContract,
 )
 
-from ..publishers import bindings
 from ..publishers.base import Publisher
 from ..publishers.channels import ChannelPublisher
 from ..subscribers.base import Subscriber
@@ -31,12 +30,11 @@ class ChannelRegistrar(Registrar):
     def publisher(self, cls: type[Publisher[Any]], **options: Any) -> None:
         self.check_open()
         channel = self._channel(cls)
-        bindings.check(cls)
-        sender = self.broker.publisher(channel, **options)
-        bindings.add(
-            cls, self, self.sender(cls, sender.publish, {"channel": channel})
+        self.bind_publisher(
+            cls,
+            lambda: self.broker.publisher(channel, **options).publish,
+            {"channel": channel},
         )
-        self._publishers.add(cls)
 
     def subscriber(
         self,

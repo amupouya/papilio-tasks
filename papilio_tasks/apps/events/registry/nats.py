@@ -2,7 +2,6 @@ from typing import Any
 
 from papilio_tasks.infra.faststream.brokers.contracts.nats import NatsContract
 
-from ..publishers import bindings
 from ..publishers.base import Publisher
 from ..publishers.nats import NatsPublisher
 from ..subscribers.base import Subscriber
@@ -26,12 +25,11 @@ class NatsRegistrar(Registrar):
     def publisher(self, cls: type[Publisher[Any]], **options: Any) -> None:
         self.check_open()
         subject = self._subject(cls)
-        bindings.check(cls)
-        sender = self.broker.publisher(subject, **options)
-        bindings.add(
-            cls, self, self.sender(cls, sender.publish, {"subject": subject})
+        self.bind_publisher(
+            cls,
+            lambda: self.broker.publisher(subject, **options).publish,
+            {"subject": subject},
         )
-        self._publishers.add(cls)
 
     def subscriber(
         self,

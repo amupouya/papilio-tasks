@@ -6,7 +6,6 @@ from papilio_tasks.infra.faststream.brokers.contracts.kafka import (
     KafkaContract,
 )
 
-from ..publishers import bindings
 from ..publishers.base import Publisher
 from ..publishers.kafka import KafkaPublisher
 from ..subscribers.base import Subscriber
@@ -31,12 +30,11 @@ class KafkaRegistrar(Registrar):
     def publisher(self, cls: type[Publisher[Any]], **options: Any) -> None:
         self.check_open()
         topic = self._topic(cls)
-        bindings.check(cls)
-        sender = self.broker.publisher(topic, **options)
-        bindings.add(
-            cls, self, self.sender(cls, sender.publish, {"topic": topic})
+        self.bind_publisher(
+            cls,
+            lambda: self.broker.publisher(topic, **options).publish,
+            {"topic": topic},
         )
-        self._publishers.add(cls)
 
     def subscriber(
         self,

@@ -9,7 +9,6 @@ from faststream import AckPolicy
 from papilio_tasks.tools.functions import Function
 from papilio_tasks.tools.retry import Retry
 
-from ..publishers import bindings
 from ..publishers.base import PublisherRoute
 from ..registry.base import Registrar
 
@@ -84,14 +83,11 @@ class Router:
             raise TypeError("Router and broker must use the same transport")
         native = self.native_router_type(**dict(self.options))
         for route, options in self.publishers.items() if publishers else ():
-            bindings.check(route)
-            sender = native.publisher(**dict(options))
-            bindings.add(
+            registrar.bind_publisher(
                 route,
-                registrar,
-                registrar.sender(route, sender.publish, options),
+                lambda: native.publisher(**dict(options)).publish,
+                options,
             )
-            registrar._publishers.add(route)
         for item in self.subscribers if subscribers else ():
             options = dict(item.options)
             # Preserve the class Events contract: handlers never auto-reply.

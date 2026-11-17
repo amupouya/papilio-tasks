@@ -443,3 +443,43 @@ async def test_function_projection_project_and_publication_hook_order():
         assert phases == [("shared", "projected"), ("local", "projected")]
     finally:
         await broker.shutdown()
+
+
+@pytest.mark.parametrize("family", ["scheduler", "projection"])
+async def test_independent_function_jobs_can_wait_concurrently(family):
+    services, barrier = Services(), asyncio.Barrier(2)
+
+    async def read(service: Service, value: int) -> int:
+        await barrier.wait()
+        assert not service.closed
+        return value
+
+    async def transform(service: Service, value: int) -> str:
+        return str(value)
+
+    async def write(service: Service, value: str) -> int:
+        return int(value)
+
+    if family == "scheduler":
+        router = TaskRouter()
+        task = router.task(dependency=Service)(read)
+        broker = create_broker(routers=[router], providers=[services])
+    else:
+        router = ProjectionRouter()
+        task = router.projection(
+            read=read, transform=transform, write=write, dependency=Service
+        )
+        broker = projections(routers=[router], providers=[services])
+    await broker.startup()
+    try:
+        handles = await asyncio.gather(task.enqueue(1), task.enqueue(2))
+        values = await asyncio.wait_for(
+            asyncio.gather(*(result(handle) for handle in handles)), 5
+        )
+        assert values == [1, 2]
+        await broker.wait_all()
+        assert len(services.instances) == 2
+        assert services.instances[0] is not services.instances[1]
+        assert all(service.closed for service in services.instances)
+    finally:
+        await broker.shutdown()

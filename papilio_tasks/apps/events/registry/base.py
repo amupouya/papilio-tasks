@@ -50,7 +50,7 @@ class Registrar(ABC):
         self, cls: type[Subscriber[Any]], **options: Any
     ) -> None: ...
 
-    def has_publisher(self, cls: type[Publisher[Any]]) -> bool:
+    def has_publisher(self, cls: Publication[Any]) -> bool:
         return cls in self._publishers
 
     def has_subscriber(self, cls: type[Subscriber[Any]]) -> bool:
@@ -89,6 +89,27 @@ class Registrar(ABC):
             )
 
         return execute
+
+    def bind_publisher(
+        self,
+        publication: Publication[Any],
+        create: Callable[[], Sender],
+        meta: Mapping[str, object],
+    ) -> None:
+        """Bind a native sender to this registrar during assembly.
+
+        The factory runs synchronously after ownership checks. Rejected
+        declarations therefore cannot create native publishers.
+        """
+        self.check_publisher(publication)
+        native = create()
+        bindings.add(publication, self, self.sender(publication, native, meta))
+        self._publishers.add(publication)
+
+    def check_publisher(self, publication: Publication[Any]) -> None:
+        """Reject closed or already-bound declarations before preparation."""
+        self.check_open()
+        bindings.check(publication)
 
     def handler(
         self,

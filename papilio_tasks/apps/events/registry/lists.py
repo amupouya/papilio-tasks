@@ -7,7 +7,6 @@ from papilio_tasks.infra.faststream.brokers.contracts.redis import (
     RedisContract,
 )
 
-from ..publishers import bindings
 from ..publishers.base import Publisher
 from ..publishers.lists import ListPublisher
 from ..subscribers.base import Subscriber
@@ -31,12 +30,11 @@ class ListRegistrar(Registrar):
     def publisher(self, cls: type[Publisher[Any]], **options: Any) -> None:
         self.check_open()
         name = self._list(cls)
-        bindings.check(cls)
-        sender = self.broker.publisher(list=name, **options)
-        bindings.add(
-            cls, self, self.sender(cls, sender.publish, {"list": name})
+        self.bind_publisher(
+            cls,
+            lambda: self.broker.publisher(list=name, **options).publish,
+            {"list": name},
         )
-        self._publishers.add(cls)
 
     def subscriber(
         self,

@@ -7,7 +7,6 @@ from nats.js.api import ConsumerConfig
 
 from papilio_tasks.infra.faststream.brokers.contracts.nats import NatsContract
 
-from ..publishers import bindings
 from ..publishers.base import Publisher
 from ..publishers.jetstream import JetPublisher
 from ..subscribers.base import Subscriber
@@ -35,20 +34,15 @@ class JetRegistrar(Registrar):
     def publisher(self, cls: type[Publisher[Any]], **options: Any) -> None:
         self.check_open()
         subject, stream = self._route(cls)
-        bindings.check(cls)
-        sender = self.broker.publisher(
-            subject, stream=deepcopy(stream), **options
-        )
-        bindings.add(
+        self.bind_publisher(
             cls,
-            self,
-            self.sender(
-                cls,
-                sender.publish,
-                {"subject": subject, "stream": stream.name},
+            lambda: (
+                self.broker.publisher(
+                    subject, stream=deepcopy(stream), **options
+                ).publish
             ),
+            {"subject": subject, "stream": stream.name},
         )
-        self._publishers.add(cls)
 
     def subscriber(
         self,

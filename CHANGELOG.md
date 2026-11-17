@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.1 — 2026-11-17
+
+- Centralize Events publisher binding and ownership in Registrar for both
+  function routers and all class transport registrars. Routers no longer
+  access private registrar state or maintain a separate binding path.
+- Reject closed/duplicate registrations before native sender creation; retain
+  publisher hooks, metadata, error propagation and release/rebinding behavior.
+- Verify independent function Scheduler and Projection jobs can wait
+  concurrently with separate request-scoped dependencies.
+
 ## 1.8.0 — 2026-11-17
 
 - Optional function TaskRouter declarations with typed enqueue/time/cron/interval

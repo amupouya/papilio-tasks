@@ -9,7 +9,6 @@ from papilio_tasks.infra.faststream.brokers.contracts.rabbit import (
     RabbitContract,
 )
 
-from ..publishers import bindings
 from ..publishers.base import Publisher
 from ..publishers.rabbit import RabbitPublisher
 from ..subscribers.base import Subscriber
@@ -50,21 +49,17 @@ class RabbitRegistrar(Registrar):
         self.check_open()
         if not isinstance(cls, type) or not issubclass(cls, RabbitPublisher):
             raise TypeError("Register a RabbitPublisher class")
-        bindings.check(cls)
+        self.check_publisher(cls)
         exchange = self._exchange(cls)
-        sender = self.broker.publisher(
-            exchange=exchange, routing_key=cls.routing_key, **options
-        )
-        bindings.add(
+        self.bind_publisher(
             cls,
-            self,
-            self.sender(
-                cls,
-                sender.publish,
-                {"exchange": exchange.name, "routing_key": cls.routing_key},
+            lambda: (
+                self.broker.publisher(
+                    exchange=exchange, routing_key=cls.routing_key, **options
+                ).publish
             ),
+            {"exchange": exchange.name, "routing_key": cls.routing_key},
         )
-        self._publishers.add(cls)
         self._exchanges[exchange.name] = exchange
 
     def subscriber(
