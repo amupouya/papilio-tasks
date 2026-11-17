@@ -1,24 +1,25 @@
 from .contracts import Sender
 
-_senders: dict[type, tuple[object, Sender]] = {}
+_senders: dict[object, tuple[object, Sender]] = {}
 
 
-def check(cls: type) -> None:
+def check(cls: object) -> None:
     if cls in _senders:
-        raise ValueError(f"Publisher already registered: {cls.__qualname__}")
+        name = getattr(cls, "__qualname__", cls)
+        raise ValueError(f"Publisher already registered: {name}")
 
 
-def add(cls: type, owner: object, sender: Sender) -> None:
+def add(cls: object, owner: object, sender: Sender) -> None:
     check(cls)
     _senders[cls] = (owner, sender)
 
 
-def get(cls: type) -> Sender:
+def get(cls: object) -> Sender:
     try:
         return _senders[cls][1]
     except KeyError:
         raise RuntimeError(
-            f"Publisher is not registered: {cls.__qualname__}"
+            f"Publisher is not registered: {getattr(cls, '__qualname__', cls)}"
         ) from None
 
 

@@ -6,7 +6,9 @@ from functools import wraps
 from inspect import iscoroutinefunction
 from typing import Any, Concatenate, Protocol
 
-from papilio_tasks.apps.events.publishers.base import Publisher
+from papilio_tasks.apps.events.publishers.base import (
+    Publication,
+)
 
 from .writer import OutboxWriter
 
@@ -17,8 +19,8 @@ class OutboxOwner(Protocol):
 
 
 def _decorate[T, R, Owner: OutboxOwner, **P](
-    publisher: type[Publisher[T]],
-    execute: Callable[[OutboxWriter, type[Publisher[T]], R], Awaitable[None]],
+    publisher: Publication[T],
+    execute: Callable[[OutboxWriter, Publication[T], R], Awaitable[None]],
 ) -> Callable[
     [Callable[Concatenate[Owner, P], Awaitable[R]]],
     Callable[Concatenate[Owner, P], Coroutine[Any, Any, R]],
@@ -50,7 +52,7 @@ def _decorate[T, R, Owner: OutboxOwner, **P](
 
 
 def publish[T, R, Owner: OutboxOwner, **P](
-    publisher: type[Publisher[T]],
+    publisher: Publication[T],
     *,
     select: Callable[[R], T],
     **options: Any,
@@ -67,7 +69,7 @@ def publish[T, R, Owner: OutboxOwner, **P](
     settings = deepcopy(options)
 
     async def append(
-        writer: OutboxWriter, target: type[Publisher[T]], result: R
+        writer: OutboxWriter, target: Publication[T], result: R
     ) -> None:
         await writer.append(target, select(result), **settings)
 
@@ -75,7 +77,7 @@ def publish[T, R, Owner: OutboxOwner, **P](
 
 
 def publish_batch[T, R, Owner: OutboxOwner, **P](
-    publisher: type[Publisher[T]],
+    publisher: Publication[T],
     *,
     select: Callable[[R], Sequence[T]],
     **options: Any,
@@ -87,7 +89,7 @@ def publish_batch[T, R, Owner: OutboxOwner, **P](
     settings = deepcopy(options)
 
     async def append(
-        writer: OutboxWriter, target: type[Publisher[T]], result: R
+        writer: OutboxWriter, target: Publication[T], result: R
     ) -> None:
         await writer.append_batch(target, select(result), **settings)
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.8.0 — 2026-11-17
+
+- Optional function TaskRouter declarations with typed enqueue/time/cron/interval
+  helpers, explicit leading service injection and existing Taskiq execution,
+  retry source/beat and monitoring. Broker selection stays in bootstrap.
+- Function ProjectionRouter declarations sharing the class read/transform/write
+  runner, request scopes, stage hooks, publication hooks and result handling.
+- FastStream transport routers for RabbitMQ, Kafka, NATS/JetStream and Redis
+  Streams/Lists/PubSub, using native routers and the existing Events retry,
+  injection, subscribe hooks and acknowledgement constraints.
+- Typed function publisher routes supported by direct publish, transactional
+  Outbox append/batch/decorators and native relay, with stable route keys.
+- Bootstrapper router discovery in existing family modules/packages, explicit
+  routers composition, overlapping-root/re-export deduplication and producer-only
+  discovery. Existing classes/import paths remain supported; base dependencies
+  and host-owned transaction/lifecycle boundaries are unchanged.
+
 ## 1.7.0 — 2026-11-17
 
 - Optional `inbox-postgres` integration using native `sqlalchemy-inbox` 0.2:

@@ -19,6 +19,7 @@ from papilio_tasks.tools.hooks.publish import PublishHooks
 from .application import create_beat, create_broker
 from .backends.redis import RedisStreamBroker
 from .registry.redis import RedisRegistrar
+from .router import ProjectionRouter
 
 __all__ = ["RedisSettings", "create_app"]
 
@@ -28,6 +29,7 @@ def create_app(
     *,
     providers: Sequence[Provider] = (),
     modules: Sequence[str] = (),
+    routers: Sequence[ProjectionRouter] = (),
     producers: Sequence[Producer] = (),
     publish_hooks: type[PublishHooks] | None = None,
     retry: RetryRuntime | None = None,
@@ -56,6 +58,7 @@ def create_app(
         registrar=RedisRegistrar(transport),
         providers=providers,
         modules=modules,
+        routers=routers,
         retry_source=source,
         retry=retry,
         publish_hooks=publish_hooks,

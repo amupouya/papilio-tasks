@@ -4,21 +4,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from functools import wraps
 from inspect import iscoroutinefunction
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from papilio_tasks.tools.hooks import emit
-from papilio_tasks.tools.hooks.projection import (
-    Call,
-    Data,
-    Failure,
-    Hooks,
-    Stage,
-    Written,
-)
+from papilio_tasks.tools.hooks.projection import Hooks
 from papilio_tasks.tools.hooks.publish import PublishHooks
 from papilio_tasks.tools.retry import Retry
 
+from . import pipeline
 from .contracts import ProjectionContract
 
 if TYPE_CHECKING:
@@ -101,48 +93,16 @@ class Projection[T, D, R](ProjectionContract[T, D, R], ABC):
         kwargs: dict[str, Any],
     ) -> R:
         """Callers own resolution and scope of shared hooks."""
-        common: Hooks[object, object, object] = (
-            shared if shared is not None else Hooks()
-        )
-        local = self.hooks
-        call = Call(
-            projection=f"{type(self).__module__}.{type(self).__qualname__}",
+        return await pipeline.run(
+            name=f"{type(self).__module__}.{type(self).__qualname__}",
+            read=self.read,
+            transform=self.transform,
+            write=self.write,
+            local=self.hooks,
+            shared=shared,
             args=args,
-            kwargs=MappingProxyType(kwargs.copy()),
+            kwargs=kwargs,
         )
-        stage: Stage = "read"
-        try:
-            data = await self.read(*args, **kwargs)
-            stage = "after_read"
-            read = Data(call, data)
-            await emit(common.after_read, Data[object](call, data))
-            await emit(local.after_read, read)
-
-            stage = "transform"
-            converted = await self.transform(data)
-            stage = "after_transform"
-            transformed = Data(call, converted)
-            await emit(common.after_transform, Data[object](call, converted))
-            await emit(local.after_transform, transformed)
-
-            stage = "write"
-            result = await self.write(converted)
-            stage = "after_write"
-            written = Written(call, converted, result)
-            await emit(
-                common.after_write,
-                Written[object, object](call, converted, result),
-            )
-            await emit(local.after_write, written)
-            return result
-        except Exception as error:
-            failure = Failure(call, stage, error)
-            try:
-                await emit(common.on_error, failure)
-                await emit(local.on_error, failure)
-            except Exception as hook_error:
-                raise error from hook_error
-            raise
 
 
 class Direct[T, R](Projection[T, T, R]):

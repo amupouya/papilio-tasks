@@ -22,6 +22,7 @@ from papilio_tasks.tools.hooks.publish import PublishHooks
 
 from .base import Projection
 from .registry import Registrar
+from .router import ProjectionRouter
 
 
 def create_broker(
@@ -29,6 +30,7 @@ def create_broker(
     registrar: Registrar | None = None,
     providers: Sequence[Provider] = (),
     modules: Sequence[str] = (),
+    routers: Sequence[ProjectionRouter] = (),
     retry_source: MutableSourceContract | None = None,
     retry: RetryRuntime | None = None,
     publish_hooks: type[PublishHooks] | None = None,
@@ -47,6 +49,8 @@ def create_broker(
         raise ValueError("Broker already has a Papilio application")
 
     try:
+        if any(not isinstance(router, ProjectionRouter) for router in routers):
+            raise TypeError("routers must contain ProjectionRouter instances")
         if publish_hooks is not None and (
             not isinstance(publish_hooks, type)
             or not issubclass(publish_hooks, PublishHooks)
@@ -55,15 +59,34 @@ def create_broker(
                 "publish_hooks must be a PublishHooks class or None"
             )
         classes = Bootstrapper(modules).classes("projections", Projection)
+        selected = list(
+            dict.fromkeys(
+                [
+                    *Bootstrapper(modules).routers(
+                        "projections", ProjectionRouter
+                    ),
+                    *routers,
+                ]
+            )
+        )
+        tasks = list(
+            dict.fromkeys(task for router in selected for task in router.tasks)
+        )
         runtime = prepare_retry(
-            broker, retry, retry_source, (cls.retry for cls in classes)
+            broker,
+            retry,
+            retry_source,
+            [*(cls.retry for cls in classes), *(task.retry for task in tasks)],
         )
         for cls in classes:
             registry.include(cls)
+        for task in tasks:
+            task.include(registry.broker)
         container = make_async_container(TaskiqProvider(), *providers)
         setup_dishka(container, broker)
         broker.state.papilio_container = container
         broker.state.papilio_publish_hooks = publish_hooks
+        broker.state.papilio_projection_hooks = registry.hooks
 
         @broker.on_event(
             TaskiqEvents.CLIENT_SHUTDOWN, TaskiqEvents.WORKER_SHUTDOWN

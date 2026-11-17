@@ -1,29 +1,31 @@
-"""Internal class-to-task bindings for synchronous application assembly."""
+"""Internal declaration-to-task bindings for application assembly."""
 
 from typing import Any
 
 from taskiq import AsyncBroker
 from taskiq.decor import AsyncTaskiqDecoratedTask
 
-_tasks: dict[type, AsyncTaskiqDecoratedTask[Any, Any]] = {}
+_tasks: dict[object, AsyncTaskiqDecoratedTask[Any, Any]] = {}
 
 
-def check(cls: type) -> None:
+def check(cls: object) -> None:
     if cls in _tasks:
-        raise ValueError(f"Class already registered: {cls.__qualname__}")
+        name = getattr(cls, "__qualname__", cls)
+        raise ValueError(f"Class or function already registered: {name}")
 
 
-def add(cls: type, task: AsyncTaskiqDecoratedTask[Any, Any]) -> None:
+def add(cls: object, task: AsyncTaskiqDecoratedTask[Any, Any]) -> None:
     check(cls)
     _tasks[cls] = task
 
 
-def get(cls: type) -> AsyncTaskiqDecoratedTask[Any, Any]:
+def get(cls: object) -> AsyncTaskiqDecoratedTask[Any, Any]:
     try:
         return _tasks[cls]
     except KeyError:
+        name = getattr(cls, "__qualname__", cls)
         raise RuntimeError(
-            f"Class is not included: {cls.__qualname__}"
+            f"Class or function is not included: {name}"
         ) from None
 
 

@@ -1,3 +1,3 @@
-from .base import Publisher, publish
+from .base import Publication, Publisher, PublisherRoute, publish
 
-__all__ = ["Publisher", "publish"]
+__all__ = ["Publication", "Publisher", "PublisherRoute", "publish"]

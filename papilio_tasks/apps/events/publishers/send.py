@@ -12,11 +12,12 @@ from papilio_tasks.tools.hooks.publish import (
     publish,
 )
 
+from .base import Publication
 from .contracts import Sender
 
 
 async def send(
-    cls: type,
+    cls: Publication[Any],
     event: Any,
     options: dict[str, Any],
     sender: Sender,

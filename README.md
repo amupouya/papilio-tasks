@@ -61,6 +61,235 @@ Projection extras are independent and do not install FastStream. For RabbitMQ
 transport with a Redis retry source, install both `projection-rabbit` and
 `projection-redis`. Each application owns its dependencies.
 
+## Function routers and automatic discovery
+
+Version 1.8 adds function declarations alongside the existing classes. Both
+styles use the same native brokers, Dishka request scopes, retry policies and
+monitoring. Existing class declarations and their names remain valid. Routers
+collect definitions without opening connections or constructing services.
+
+### Scheduler functions
+
+Place a router in `schedulers.py` or a `schedulers/` package below an
+application-owned root:
+
+```python
+# myapp/templates/tasks/schedulers.py
+from papilio_tasks.apps.schedulers import TaskRouter
+
+router = TaskRouter()
+
+@router.task(name="templates.refresh")
+async def refresh(template_id: int, *, force: bool = False) -> int:
+    return template_id
+```
+
+The existing bootstrap discovers classes and router instances together:
+
+```python
+# myapp/bootstrap.py
+from papilio_tasks.apps.schedulers.application import create_broker
+
+broker = create_broker(modules=["myapp.templates.tasks"])
+```
+
+The default broker is in-process Memory. Pass the existing backend registrar
+for a production broker; the same function router works with Taskiq Redis,
+RabbitMQ, NATS or Kafka. Broker destinations/subscriptions and schedule sources
+remain application-owned. Function declarations use the selected broker's
+routing defaults; advanced publication can use the native `refresh.task()`
+handle. Register any additional destinations through the existing broker API.
+
+```python
+from myapp.templates.tasks.schedulers import refresh
+
+handle = await refresh.enqueue(12, force=True)
+plan = await refresh.at(source, when, 12)
+cron = await refresh.cron(source, "0 8 * * *", 12)
+interval = await refresh.every(source, 60, 12)
+```
+
+The payload signature and result type are preserved in these helpers. The
+scheduler source is supplied explicitly and the ordinary beat still owns its
+execution. A `retry=Retry(...)` declaration uses the existing `retry` or
+`retry_source` bootstrap settings and retry beat. Native schedule labels can be
+supplied with `labels={"schedule": [{"cron": "0 8 * * *"}]}`.
+
+`@router.task()` returns a deferred task reference. Its `.function` attribute
+exposes the original async callable for local execution with explicit arguments.
+Alternatively keep a normal function and assign
+`refresh_task = router.task()(refresh)` so `refresh` remains directly callable.
+Before assembly, enqueue/scheduling raises an unregistered-definition error;
+shutdown releases the binding so a later application can assemble it again.
+
+### Explicit function dependencies
+
+For dependency injection, select one provided service class and make it the
+first positional argument. Its constructor can depend on any other provided
+services. Only the remaining arguments belong to the message:
+
+```python
+from myapp.templates.services import Templates
+
+@router.task(dependency=Templates, name="templates.refresh_with_service")
+async def refresh_with_service(
+    service: Templates, template_id: int, *, force: bool = False,
+) -> int:
+    return await service.refresh(template_id, force=force)
+
+# The injected service is neither supplied nor serialized here.
+handle = await refresh_with_service.enqueue(12, force=True)
+```
+
+Supply the service's ordinary Dishka provider through `providers=`. The router
+does not infer providers, create a second container or manage a transaction.
+This explicit leading dependency lets static typing preserve the payload
+signature. Arbitrary `FromDishka` parameters in the payload are rejected.
+Every worker attempt obtains dependencies from its own existing request scope.
+
+### Function projections
+
+Use a `ProjectionRouter` in `projections.py` or `projections/`. The pipeline
+still has three explicit async stages:
+
+```python
+from papilio_tasks.apps.projections.router import ProjectionRouter
+
+router = ProjectionRouter()
+
+async def read(account_id: int) -> list[int]:
+    return [account_id]
+
+async def transform(data: list[int]) -> str:
+    return str(data)
+
+async def write(data: str) -> int:
+    return len(data)
+
+refresh = router.projection(
+    name="templates.projection", read=read, transform=transform, write=write,
+)
+```
+
+The existing projections `create_broker(modules=[...])` discovers this router.
+`refresh.enqueue(...)` takes the read arguments and returns the write result's
+native task handle. `at`, `cron`, `every`, native `task()` and the result-preserving
+`refresh.project(select=...)` decorator are also available. Local `hooks=` and
+`publish_hooks=` select provided hook classes; registrar/application hooks keep
+their existing order and error semantics.
+
+With `dependency=Templates`, all three stages take `service: Templates` first
+and share the same request-scoped instance. Transform and write each take one
+positional data argument after it. The three stages, shared/local hooks and
+cleanup use the existing execution scope. Write continues to own persistence
+and commit/partial-failure behavior.
+
+### FastStream function routes
+
+Choose `RabbitRouter`, `KafkaRouter`, `NatsRouter` or `RedisRouter` from
+`papilio_tasks.apps.events.routers.<transport>`. Constructor, subscriber and
+publisher transport options are forwarded to the corresponding native
+FastStream router. NATS also accepts native JetStream `stream`, `durable` and
+`pull_sub` options. Redis accepts native `stream`, `list` and `channel` options.
+
+Keep outgoing declarations separate from consumers that import application
+operations. Publishers can live in a module-level `publishers.py`; discovery
+never requires a `tasks/` parent. For example, keep the event DTO in its owning
+contract module:
+
+```python
+# myapp/templates/domain/events.py
+from pydantic import BaseModel
+
+class TemplateUpdated(BaseModel):
+    id: int
+```
+
+```python
+# myapp/templates/publishers.py
+from papilio_tasks.apps.events.routers.nats import NatsRouter
+from .domain.events import TemplateUpdated
+
+UPDATED_SUBJECT = "templates.updated"
+router = NatsRouter()
+updated = router.publisher(
+    TemplateUpdated, subject=UPDATED_SUBJECT,
+    outbox_key="templates.updated.v1",
+)
+```
+
+Give the incoming adapter its own router:
+
+```python
+# myapp/templates/tasks/subscribers.py
+from papilio_tasks.apps.events.routers.nats import NatsRouter
+from myapp.templates.domain.events import TemplateUpdated
+from myapp.templates.publishers import UPDATED_SUBJECT
+
+router = NatsRouter()
+
+@router.subscriber(subject=UPDATED_SUBJECT, queue="template-workers")
+async def receive(event: TemplateUpdated) -> None:
+    print(event.id)
+```
+
+Application commands may import the outgoing declaration without importing
+consumer handlers. Declaration modules should not import those commands or
+workers. In applications that require transport-independent business code, use
+an injected application-owned publication contract and bind its native sender
+at composition instead; relocating a file alone does not remove framework
+coupling.
+
+`create_app(registrar=..., publishers=["myapp.templates"])` discovers only
+senders. Giving that root to `subscribers=` discovers only consumers. Supply both
+for both capabilities. Shared/re-exported router instances are also supported
+and are included once with the selected capabilities. Publisher-only discovery
+does not import a separate `subscribers.py` module. `connect()` remains
+producer-only; `start()` starts consumption.
+
+```python
+await updated.publish(TemplateUpdated(id=12))
+```
+
+The existing direct `publish(updated, select=...)` decorator accepts this route.
+Subscribers remain ordinary directly callable async functions. They can use
+`dependency=Service` with a leading service argument, the same `Retry` policy and
+provided subscribe hooks as class subscribers. Native ack policies remain in
+force; managed retry rejects `ACK_FIRST` and `MANUAL`. Events handlers retain
+`no_reply=True` and discard return values, as class subscribers do.
+
+For transactional publication, the same route works with `OutboxWriter.append`,
+`append_batch` and the existing Outbox method decorators. Give Outbox the same
+module roots or explicit routers:
+
+```python
+runtime = Outbox(native_outbox_broker, modules=["myapp.templates"])
+writer = runtime.writer(session)
+# Inside the host transaction that also owns the domain writes:
+await writer.append(updated, TemplateUpdated(id=12))
+```
+
+Only routes with a stable `outbox_key` participate in automatic Outbox discovery.
+Conflicting/mutated keys retain the existing errors. The native relay publishes
+through the registered route, including its native prefix and middleware.
+Inbox claims remain explicit inside the host transaction; a router adds no
+implicit claim, commit, retry loop or acknowledgement policy.
+
+### Composition and discovery boundaries
+
+All existing application factories also accept `routers=[router, ...]`,
+including the configured Redis scheduler/projection and Rabbit Events factories.
+Explicit and discovered references to the same router are deduplicated by
+identity. Different tasks/subscribers with the same name fail during assembly.
+
+The public `Bootstrapper(roots).routers(family, RouterType)` finds instances in
+those same selected family files/packages. Overlapping roots, aliases and
+re-exports are deduplicated. Existing class discovery still excludes imported
+classes. Discovery imports only the selected families beneath the supplied
+roots and propagates missing business dependencies; it does not silently skip
+import errors. Keep routers exported at module scope. Define all routes before
+assembling an application; assembly includes the definitions present at that time.
+
 ## FastStream infrastructure
 
 `events-rabbit` installs FastStream's Rabbit and CLI extras and the Dishka

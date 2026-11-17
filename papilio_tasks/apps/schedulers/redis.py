@@ -21,6 +21,7 @@ from papilio_tasks.infra.taskiq.sources.base import Source
 from .application import create_beat, create_broker
 from .backends.redis import RedisStreamBroker
 from .registry.redis import RedisRegistrar
+from .router import TaskRouter
 
 __all__ = ["RedisSettings", "SchedulerApplication", "create_app"]
 
@@ -50,6 +51,7 @@ def create_app(
     *,
     providers: Sequence[Provider] = (),
     modules: Sequence[str] = (),
+    routers: Sequence[TaskRouter] = (),
     producers: Sequence[Producer] = (),
     retry: RetryRuntime | None = None,
 ) -> SchedulerApplication:
@@ -73,6 +75,7 @@ def create_app(
         registrar=RedisRegistrar(transport),
         providers=providers,
         modules=modules,
+        routers=routers,
         retry_source=source if retry is None else None,
         retry=retry,
     )

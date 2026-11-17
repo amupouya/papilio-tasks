@@ -13,6 +13,7 @@ from papilio_tasks.tools.hooks.subscribe import SubscribeHooks
 
 from .publishers.base import Publisher
 from .registry.base import Registrar
+from .routers.base import Router
 from .subscribers.base import Subscriber
 
 
@@ -79,6 +80,7 @@ def create_app(
     providers: Sequence[Provider] = (),
     publishers: Sequence[str] = (),
     subscribers: Sequence[str] = (),
+    routers: Sequence[Router] = (),
     producers: Sequence[Producer] = (),
     publish_hooks: type[PublishHooks] | None = None,
     subscribe_hooks: type[SubscribeHooks] | None = None,
@@ -93,6 +95,8 @@ def create_app(
     registrar.check_open()
     native = registrar.broker.native
     try:
+        if any(not isinstance(router, Router) for router in routers):
+            raise TypeError("routers must contain Events router instances")
         for selected, base, name in (
             (publish_hooks, PublishHooks, "publish_hooks"),
             (subscribe_hooks, SubscribeHooks, "subscribe_hooks"),
@@ -108,12 +112,23 @@ def create_app(
         receivers = Bootstrapper(subscribers).classes(
             "subscribers", Subscriber
         )
+        # Merge capabilities before inclusion. A shared/re-exported router is
+        # compiled once; producer-only roots must never install consumers.
+        plans: dict[Router, tuple[bool, bool]] = {}
+        for router in Bootstrapper(publishers).routers("publishers", Router):
+            plans[router] = (True, False)
+        for router in Bootstrapper(subscribers).routers("subscribers", Router):
+            plans[router] = (plans.get(router, (False, False))[0], True)
+        for router in routers:
+            plans[router] = (True, True)
         for cls in senders:
             if not registrar.has_publisher(cls):
                 registrar.publisher(cls)
         for cls in receivers:
             if not registrar.has_subscriber(cls):
                 registrar.subscriber(cls)
+        for router, (send, receive) in plans.items():
+            router.include(registrar, publishers=send, subscribers=receive)
         container = make_async_container(FastStreamProvider(), *providers)
         # The shared lifecycle protocol excludes native DI middleware methods.
         setup_dishka(container, broker=cast(Any, native))

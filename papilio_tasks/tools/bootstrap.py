@@ -57,3 +57,19 @@ class Bootstrapper:
                     seen.add(obj)
                     found.append(obj)
         return found
+
+    def routers[T](self, name: str, base: type[T]) -> list[T]:
+        """Find router instances in selected family modules, once by identity.
+
+        Re-exports and overlapping roots are allowed. Unrelated files are not
+        imported; missing business dependencies retain their original errors.
+        The family type is supplied by the caller to isolate optional backends.
+        """
+        found: list[T] = []
+        seen: set[int] = set()
+        for module in self.modules(name):
+            for _, value in inspect.getmembers(module):
+                if isinstance(value, base) and id(value) not in seen:
+                    seen.add(id(value))
+                    found.append(value)
+        return found

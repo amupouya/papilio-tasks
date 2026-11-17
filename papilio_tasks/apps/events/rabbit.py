@@ -13,6 +13,7 @@ from papilio_tasks.tools.hooks.subscribe import SubscribeHooks
 from .application import Application
 from .application import create_app as assemble
 from .registry.rabbit import RabbitRegistrar
+from .routers.base import Router
 
 
 def create_app(
@@ -21,6 +22,7 @@ def create_app(
     providers: Sequence[Provider] = (),
     publishers: Sequence[str] = (),
     subscribers: Sequence[str] = (),
+    routers: Sequence[Router] = (),
     producers: Sequence[Producer] = (),
     publish_hooks: type[PublishHooks] | None = None,
     subscribe_hooks: type[SubscribeHooks] | None = None,
@@ -31,6 +33,7 @@ def create_app(
         providers=providers,
         publishers=publishers,
         subscribers=subscribers,
+        routers=routers,
         producers=producers,
         publish_hooks=publish_hooks,
         subscribe_hooks=subscribe_hooks,

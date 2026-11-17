@@ -8,8 +8,13 @@ from faststream import AckPolicy, FastStream
 from faststream_outbox import OutboxBroker
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from papilio_tasks.apps.events.publishers.base import Publisher
+from papilio_tasks.apps.events.publishers.base import (
+    Publication,
+    Publisher,
+    PublisherRoute,
+)
 from papilio_tasks.apps.events.publishers.bindings import get as get_sender
+from papilio_tasks.apps.events.routers.base import Router
 from papilio_tasks.apps.lifecycle import Producer, Producers
 from papilio_tasks.infra.faststream.outbox import PolicyRetry, forward
 from papilio_tasks.tools.bootstrap import Bootstrapper
@@ -25,7 +30,7 @@ class RelayApplication(FastStream):
         self,
         broker: OutboxBroker,
         producers: Sequence[Producer],
-        publishers: Sequence[type[Publisher[Any]]],
+        publishers: Sequence[Publication[Any]],
     ) -> None:
         self.producers = Producers(*producers)
         self.publishers = tuple(publishers)
@@ -68,7 +73,8 @@ class Outbox:
         broker: Native OutboxBroker, optionally configured with engine, DLQ,
             observability and pool/lifecycle settings. No connection is opened.
         modules: Roots searched through the existing publishers discovery.
-        publishers: Additional Publisher classes with stable outbox_key.
+        publishers: Additional typed declarations with stable outbox_key.
+        routers: Explicit routers, merged with discovered publisher routers.
     """
 
     def __init__(
@@ -76,21 +82,34 @@ class Outbox:
         broker: OutboxBroker,
         *,
         modules: Sequence[str] = (),
-        publishers: Sequence[type[Publisher[Any]]] = (),
+        publishers: Sequence[Publication[Any]] = (),
+        routers: Sequence[Router] = (),
     ) -> None:
         if not isinstance(broker, OutboxBroker):
             raise TypeError("Outbox requires a native OutboxBroker")
+        if any(not isinstance(router, Router) for router in routers):
+            raise TypeError("routers must contain Events router instances")
         self.native = broker
-        self._keys: dict[type[Publisher[Any]], str] = {}
-        self._routes: dict[str, type[Publisher[Any]]] = {}
+        self._keys: dict[Publication[Any], str] = {}
+        self._routes: dict[str, Publication[Any]] = {}
         self._sealed = False
         for cls in Bootstrapper(modules).classes("publishers", Publisher):
             if cls.outbox_key is not None:
                 self.include(cls)
+        selected = dict.fromkeys(
+            [
+                *Bootstrapper(modules).routers("publishers", Router),
+                *routers,
+            ]
+        )
+        for router in selected:
+            for route in router.publishers:
+                if route.outbox_key is not None:
+                    self.include(route)
         for cls in publishers:
             self.include(cls)
 
-    def include(self, publisher: type[Publisher[Any]]) -> None:
+    def include(self, publisher: Publication[Any]) -> None:
         """Register a stable route before relay assembly, idempotently.
 
         Raises:
@@ -101,10 +120,11 @@ class Outbox:
             raise RuntimeError(
                 "Register Outbox routes before creating the relay"
             )
-        if not isinstance(publisher, type) or not issubclass(
-            publisher, Publisher
+        if not isinstance(publisher, PublisherRoute) and (
+            not isinstance(publisher, type)
+            or not issubclass(publisher, Publisher)
         ):
-            raise TypeError("Expected a Publisher class")
+            raise TypeError("Expected a Publisher class or router publisher")
         key = publisher.outbox_key
         if not isinstance(key, str) or not key.strip() or len(key) > 255:
             raise ValueError("Publisher requires a stable nonempty outbox_key")
@@ -115,7 +135,7 @@ class Outbox:
         self._keys[publisher] = key
         self._routes[key] = publisher
 
-    def key(self, publisher: type[Publisher[Any]]) -> str:
+    def key(self, publisher: Publication[Any]) -> str:
         """Return a registered route, rejecting a changed key."""
         key = self._keys.get(publisher)
         if key is None:

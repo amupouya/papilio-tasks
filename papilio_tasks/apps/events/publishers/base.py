@@ -16,8 +16,34 @@ class Publisher[T]:
         return await get(cls)(event, **options)
 
 
+class PublisherRoute[T]:
+    """A typed function-router route with the same publication contract."""
+
+    def __init__(
+        self,
+        event_type: type[T],
+        *,
+        name: str | None = None,
+        outbox_key: str | None = None,
+    ) -> None:
+        self.event_type = event_type
+        self.outbox_key = outbox_key
+        self.__module__ = event_type.__module__
+        self.__qualname__ = (
+            name if name is not None else outbox_key or event_type.__qualname__
+        )
+        if not self.__qualname__:
+            raise ValueError("Publisher name cannot be empty")
+
+    async def publish(self, event: T, **options: Any) -> Any:
+        return await get(self)(event, **options)
+
+
+type Publication[T] = type[Publisher[T]] | PublisherRoute[T]
+
+
 def publish[T, **P, R](
-    publisher: type[Publisher[T]],
+    publisher: Publication[T],
     *,
     select: Callable[[Any], T],
     **options: Any,

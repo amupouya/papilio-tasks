@@ -6,6 +6,7 @@ from typing import Any
 from dishka import AsyncContainer
 from taskiq import AsyncTaskiqTask
 
+from papilio_tasks.infra.taskiq.functions import Task
 from papilio_tasks.tools.hooks.publish import (
     PublishCall,
     PublishHooks,
@@ -16,7 +17,7 @@ from .contracts import ProjectionContract
 
 
 async def enqueue[T, D, R](
-    cls: type[ProjectionContract[T, D, R]],
+    cls: type[ProjectionContract[T, D, R]] | Task[..., R],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> AsyncTaskiqTask[R]:

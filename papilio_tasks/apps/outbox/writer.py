@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import (
     AsyncTransaction,
 )
 
-from papilio_tasks.apps.events.publishers.base import Publisher
+from papilio_tasks.apps.events.publishers.base import (
+    Publication,
+)
 
 if TYPE_CHECKING:
     from .application import Outbox
@@ -59,7 +61,7 @@ class OutboxWriter:
         return {"event": event, "options": settings}
 
     async def append[T](
-        self, publisher: type[Publisher[T]], event: T, **options: Any
+        self, publisher: Publication[T], event: T, **options: Any
     ) -> int:
         """Insert an event with the caller's writes; return its pending row ID.
 
@@ -90,7 +92,7 @@ class OutboxWriter:
 
     async def append_batch[T](
         self,
-        publisher: type[Publisher[T]],
+        publisher: Publication[T],
         events: Sequence[T],
         **options: Any,
     ) -> None:
