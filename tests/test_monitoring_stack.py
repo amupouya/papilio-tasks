@@ -27,6 +27,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from taskiq import InMemoryBroker
 from tenacity import AsyncRetrying, stop_after_delay, wait_fixed
 
+from papilio_tasks.infra.faststream.dlq_monitoring import Observer
 from papilio_tasks.tools.monitoring import Monitoring
 
 pytestmark = pytest.mark.monitoring_stack
@@ -112,6 +113,10 @@ async def test_packaged_stack_exports_queries_and_provisions_dashboard():
                 "failure_reason": "retry_terminal",
             },
         )
+        # Verify the management telemetry wire/queries here; actual PostgreSQL
+        # transaction and concurrency semantics live in test_dead_letters.
+        with Observer(monitoring).operation("list", "stack") as operation:
+            operation.set_attribute("papilio_tasks.dlq.rows", 0)
         await asyncio.gather(
             asyncio.to_thread(tracer.force_flush),
             asyncio.to_thread(meter.force_flush),
@@ -136,6 +141,8 @@ async def test_packaged_stack_exports_queries_and_provisions_dashboard():
                 "messaging_process_duration_seconds_count",
                 "papilio_tasks_outbox_outcomes_total",
                 "messaging_outbox_dlq_written_event_total",
+                "papilio_tasks_dlq_operations_total",
+                "papilio_tasks_dlq_operation_duration_seconds_count",
             )
             samples = await asyncio.gather(
                 *(

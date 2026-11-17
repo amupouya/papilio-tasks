@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.6.0 — 2026-11-17
+
+- Framework-independent `DeadLetters` management for native Outbox PostgreSQL
+  tables: queue-filtered cursor pages, archive details and deliberate replay.
+- Replay atomically moves one DLQ row into pending with exact payload, headers,
+  event/correlation identity and timer key. PostgreSQL serializes concurrent
+  replays; host transactions own commit, rollback and timer-conflict recovery.
+- Typed metadata excludes payloads from list pages and exposes the native
+  delivery count. Native archives do not retain the failed-attempt count.
+- Optional shared Monitoring records SQL operation counts, durations and traces;
+  dashboard panels cover management activity. Successful SQL is distinct from
+  host commit or downstream delivery.
+- Real PostgreSQL rollback/savepoint, competing replay, native archive-to-relay,
+  custom schema and FastAPI/Papilio integration coverage. No new schema,
+  transport dependency, management endpoint or automatic replay/retention job.
+
 ## 1.5.1 — 2026-11-17
 
 - Allow database connection setup in the native Outbox lag sampling test on

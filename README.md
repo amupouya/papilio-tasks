@@ -2619,8 +2619,8 @@ Bus metrics are recorded once by native middleware. The recorder retains native
 fetch/lease/DLQ/drain observations and adds `papilio_tasks.outbox.outcomes` with
 `acked`, `nacked_retried` and `nacked_terminal`. Those outcomes reflect persisted
 native relay decisions, independently of downstream consumer completion. DLQ
-writes are not the current number of retained DLQ rows. No replay/cleanup API or
-Inbox persistence is introduced by monitoring.
+writes are not the current number of retained DLQ rows. No automatic replay,
+cleanup or Inbox persistence is introduced by monitoring.
 
 For **oldest claimable age and sample freshness**, the selected native package
 currently provides a Prometheus sampler. Use its recorder **instead of** the OTel
@@ -2896,9 +2896,10 @@ connections, so reserve capacity for your HTTP sessions and monitoring too.
 
 Configure the native DLQ explicitly for terminal failures. Without dlq_table,
 the package deletes terminal failures. Native successful rows are removed;
-failed rows retry until the selected terminal policy applies. DLQ retention,
-inspection and any deliberate replay policy remain application-owned. No
-management HTTP API or automatic retention/replay job is installed.
+failed rows retry until the selected terminal policy applies. The optional
+`DeadLetters` service below supports inspection and deliberate replay. The
+application owns authorization, retention and replay decisions. No management
+HTTP API or automatic retention/replay job is installed.
 
 Relay success means the target's **native publish operation succeeded**, not that
 its subscribers completed. Configure native broker confirmation/routing options
@@ -2908,6 +2909,94 @@ Crash after publication but before deletion can publish again with the same
 event_id. Delivery is at least once; idempotent consumers or a separate
 transactional Inbox may be needed. External provider side effects still need
 their own idempotency/reconciliation. No Inbox or exactly-once engine is added.
+
+### Outbox dead-letter management
+
+The existing `outbox-postgres` extra includes `DeadLetters`. It works with the
+same native `make_outbox_table` / `make_dlq_table` tables and any caller-owned
+SQLAlchemy `AsyncSession` or `AsyncConnection`. There is no broker connection
+or transport-specific client in management; the relay's target can be NATS,
+RabbitMQ, Kafka, Redis or another registered publisher.
+
+```python
+from papilio_tasks.apps.outbox import DeadLetters
+
+async with sessions() as session:
+    letters = DeadLetters(
+        session, outbox_table=pending, dlq_table=dead,
+        monitoring=monitoring,  # Optional existing shared Monitoring instance.
+    )
+    async with session.begin():
+        page = await letters.list(queue=runtime.key(OrderCreated), limit=50)
+        # Use page.next_cursor as after=... with the same filter on the next call.
+        detail = await letters.get(selected_id, queue=runtime.key(OrderCreated))
+
+    # Invoke only after the host has authorized this explicit operator action.
+    async with session.begin():
+        pending_id = await letters.replay(
+            selected_id, queue=runtime.key(OrderCreated),
+        )
+```
+
+`selected_id` is a DLQ row ID from the inspected page. `runtime` is the matching
+Outbox assembly; `runtime.key(Publisher)` supplies its stable module-owned queue.
+Pass the same trusted queue filter to inspection and replay when the operator
+is restricted to a route. Requiring a queue for replay prevents an ID from
+silently targeting a different route; the host still owns authorization and
+must not treat an arbitrary client-supplied queue as permission.
+
+`list` returns `DeadLetterPage(items, next_cursor)`. Items contain IDs, queue,
+failure reason, last exception, creation/failure times, timer key and native
+`deliveries_count`; payloads and headers are loaded only by `get`. Native DLQ
+archives do **not** contain `attempts_count`. Deliveries include lease reclaims
+and cannot be presented as an exact failed-handler-attempt count. Cursor pages
+are ordered by archive ID, support concurrent removals and use the caller's
+isolation level. They are not a frozen snapshot of multiple HTTP requests.
+Choose a bounded positive `limit` in the host's API.
+
+`get` returns `DeadLetterDetail | None`; payload is the exact archived wire
+`bytes`, not a decoded DTO. Exception text, headers and payload can contain
+application data; the host chooses what to expose. `replay` returns the new
+pending row ID or `None` for an absent, already moved or differently filtered
+record. It performs one PostgreSQL DELETE-returning CTE / INSERT-select, copying
+queue, payload, headers (including event/correlation identity) and `timer_id`
+exactly. It resets pending timestamps, attempt/delivery counters and lease state
+to native defaults. The old DLQ row is consumed; the pending identity is new.
+A later terminal failure creates a new native archive row.
+
+Competing replay requests for the same DLQ row are serialized by PostgreSQL:
+one committed move succeeds, and the other returns `None`. If the first rolls
+back, another request can succeed. A timer key already present in pending raises
+native SQLAlchemy `IntegrityError`; roll back the host transaction/savepoint to
+retain the archive and decide how to resolve the existing timer. Database
+isolation/lock timeouts can also raise and remain host-owned. Replay never
+rewrites the payload, publishes directly or starts a retry loop. The normal
+native relay picks up the inserted row by polling after commit; its current
+registered route and retry policy apply. Delivery retains the existing at-least-
+once behavior and stable event identity.
+
+Every method requires an active caller transaction and never begins, commits,
+closes or disposes it. A rollback/savepoint rollback restores both tables.
+The service does not check that a relay for a queue is currently running. Hosts
+must use the matching table pair and registered routes; no migration or schema
+ownership is transferred. Schema-qualified native tables are supported.
+
+For modular FastAPI or Papilio applications, provide `DeadLetters` from a normal
+request-scoped factory using the same `session` / `unit.session` as the command.
+Application services call these methods within their existing transaction or
+Papilio `@transactional` boundary. FastAPI endpoints, CLI commands, permission
+checks and responses remain in the host; the library imports neither framework.
+
+Supplying the existing `Monitoring` instance adds spans named
+`papilio_tasks.dlq.list`, `.get` and `.replay`, plus
+`papilio_tasks.dlq.operations` and `papilio_tasks.dlq.operation.duration` metrics.
+Only operation, optional queue and success/error/cancelled status label metrics;
+the selected ID, new pending ID and SQL result-row count are span attributes. Payload and
+headers are not added. Native exception diagnostics follow the host's telemetry
+filtering policy. Success records a completed **SQL operation**, including an
+empty result; it is not proof of host commit, retained pending rows or completed
+delivery. The packaged dashboard includes management activity and replay SQL
+error panels. Omit `monitoring` to use this service without OpenTelemetry.
 
 ### Events CLI
 

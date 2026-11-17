@@ -11,12 +11,13 @@ from papilio.infra.db.connection import DBConnection
 from papilio.infra.db.tools.decorators import transactional
 from papilio.infra.db.uow import PGUnitOfWork
 from sqlalchemy import insert
+from test_dead_letters import archive
 from test_outbox import Event, count, event
 from test_outbox import database as database
 
 from papilio_tasks.apps.events.publishers import bindings
 from papilio_tasks.apps.events.publishers.base import publish as direct_publish
-from papilio_tasks.apps.outbox import Outbox, OutboxWriter
+from papilio_tasks.apps.outbox import DeadLetters, Outbox, OutboxWriter
 from papilio_tasks.apps.outbox import decorators as outbox
 
 
@@ -97,5 +98,62 @@ async def test_papilio_provider_and_real_nested_transaction_ownership(
             assert await count(engine, table) == 1
     finally:
         bindings.release(runtime)
+        await container.close()
+        await connection.dispose()
+
+
+async def test_papilio_scoped_dead_letters_share_native_uow(database, pg_url):
+    engine, table, dlq, domain = database
+    identifier = await archive(engine, dlq)
+    connection = DBConnection(
+        pg_url,
+        pool_size=3,
+        max_overflow=1,
+        pool_timeout=5,
+        pool_recycle=60,
+        uow_factory=PGUnitOfWork,
+    )
+
+    class Recovery:
+        def __init__(self, unit: PGUnitOfWork, dead: DeadLetters):
+            self.unit, self.dead = unit, dead
+
+        @transactional
+        async def replay(self, fail: bool = False) -> int | None:
+            await self.unit.execute(insert(domain).values(id=9))
+            pending = await self.dead.replay(
+                identifier, queue="orders.created.v1"
+            )
+            if fail:
+                raise ValueError("rollback")
+            return pending
+
+    class Dependencies(Provider):
+        @provide(scope=Scope.REQUEST)
+        async def unit(self) -> AsyncIterator[PGUnitOfWork]:
+            async with connection.uow() as unit:
+                yield unit
+
+        @provide(scope=Scope.REQUEST)
+        def dead(self, unit: PGUnitOfWork) -> DeadLetters:
+            return DeadLetters(unit.session, outbox_table=table, dlq_table=dlq)
+
+        recovery = provide(Recovery, scope=Scope.REQUEST)
+
+    container = make_async_container(Dependencies())
+    try:
+        async with container() as scope:
+            command = await scope.get(Recovery)
+            assert command.dead.session is command.unit.session
+            with pytest.raises(ValueError, match="rollback"):
+                await command.replay(fail=True)
+            assert await count(engine, dlq) == 1
+            assert (
+                await count(engine, table) == await count(engine, domain) == 0
+            )
+            assert await command.replay() is not None
+        assert await count(engine, dlq) == 0
+        assert await count(engine, table) == await count(engine, domain) == 1
+    finally:
         await container.close()
         await connection.dispose()
