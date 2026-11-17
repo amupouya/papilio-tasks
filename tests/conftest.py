@@ -2,6 +2,8 @@ import pytest
 
 from papilio_tasks.infra.taskiq import bindings
 
+pytest_plugins = ["outbox_support"]
+
 
 @pytest.fixture(autouse=True)
 def isolated_bindings(monkeypatch):

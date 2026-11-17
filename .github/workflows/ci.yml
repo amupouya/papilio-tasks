@@ -27,7 +27,21 @@ jobs:
       TEST_RABBIT_URL: amqp://papilio:papilio-test@127.0.0.1:5672/
       TEST_KAFKA_URL: 127.0.0.1:9092
       TEST_NATS_URL: nats://127.0.0.1:4222
+      TEST_POSTGRES_URL: postgresql+asyncpg://papilio:papilio-test@127.0.0.1:5432/papilio
     services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: papilio
+          POSTGRES_PASSWORD: papilio-test
+          POSTGRES_DB: papilio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U papilio -d papilio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
       redis:
         image: redis:8.0.2-alpine
         ports:
@@ -81,7 +95,8 @@ jobs:
       - name: Install test and build dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install '.[dev,scheduler-rabbit,scheduler-redis,scheduler-nats,scheduler-kafka,projection-rabbit,projection-redis,projection-nats,projection-kafka,events-rabbit,events-kafka,events-redis,events-nats,events-retry]' hatchling
+          python -m pip install '.[dev,scheduler-rabbit,scheduler-redis,scheduler-nats,scheduler-kafka,projection-rabbit,projection-redis,projection-nats,projection-kafka,events-rabbit,events-kafka,events-redis,events-nats,events-retry,outbox-postgres]' hatchling 'fastapi>=0.115,<1' 'httpx>=0.28,<1'
+          python -m pip install 'papilio[postgresql] @ git+https://github.com/stupidprogrammer4/papilio.git@d5e9fe2382caadfc111e9ace5ddf6dfbb0b89cc8'
           python -m pip check
       - name: Check style and types
         run: |
@@ -121,12 +136,14 @@ jobs:
           REDIS_CONTAINER: ${{ job.services.redis.id }}
           RABBIT_CONTAINER: ${{ job.services.rabbit.id }}
           KAFKA_CONTAINER: ${{ job.services.kafka.id }}
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: |
           mkdir -p ci-logs
           python -m pip freeze > ci-logs/dependencies.txt
           docker logs "$REDIS_CONTAINER" > ci-logs/redis.log 2>&1 || true
           docker logs "$RABBIT_CONTAINER" > ci-logs/rabbit.log 2>&1 || true
           docker logs "$KAFKA_CONTAINER" > ci-logs/kafka.log 2>&1 || true
+          docker logs "$POSTGRES_CONTAINER" > ci-logs/postgres.log 2>&1 || true
           docker logs papilio-ci-nats > ci-logs/nats.log 2>&1 || true
       - name: Save test report and diagnostics
         if: always()

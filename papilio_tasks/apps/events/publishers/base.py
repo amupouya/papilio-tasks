@@ -1,13 +1,15 @@
 from collections.abc import Awaitable, Callable, Coroutine
 from functools import wraps
 from inspect import iscoroutinefunction
-from typing import Any
+from typing import Any, ClassVar
 
 from .bindings import get
 
 
 class Publisher[T]:
     """Declare an event route; the application owns its runtime sender."""
+
+    outbox_key: ClassVar[str | None] = None
 
     @classmethod
     async def publish(cls, event: T, **options: Any) -> Any:

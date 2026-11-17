@@ -1661,10 +1661,16 @@ and are cleaned up. `TEST_PAPILIO_CLI` can select an installed CLI executable fo
 the worker/beat integration test. Tests establish behavior, not throughput,
 network recovery or exactly-once execution.
 
+Outbox checks require the `outbox-postgres` extra. Set TEST_POSTGRES_URL to an
+isolated PostgreSQL database; without it, tests can start one invocation-owned
+local PostgreSQL cluster when binaries are available. FastAPI/httpx and Papilio
+are optional host-test dependencies; CI installs them explicitly. The retry
+checks additionally use `events-retry`. No application database is migrated.
+
 The [CI workflow](https://github.com/stupidprogrammer4/papilio-tasks/blob/main/.github/workflows/ci.yml) runs on pushes, pull requests and manual
 dispatches using Python 3.13 and 3.14. It installs all supported backend extras, checks
-style/types, runs the full suite against isolated Redis, RabbitMQ, Kafka and NATS
-with JetStream, and builds the distributions. Skipped tests fail CI, so missing
+style/types, runs the full suite against isolated Redis, RabbitMQ, Kafka, NATS
+with JetStream and PostgreSQL, and builds distributions. Skipped tests fail CI, so missing
 backend dependencies or services cannot silently reduce coverage. Test reports
 and service logs are retained as workflow artifacts; CI does not publish packages.
 
@@ -2455,6 +2461,211 @@ A restart loses its local counter/wait. Native NACK redelivery can start a fresh
 budget; `attempts=3` is not a global lifetime bound across deliveries. Pub/Sub,
 Core NATS and destructive list reads gain no crash recovery from this feature.
 Choose native redelivery/recovery and terminal dead-letter behavior explicitly.
+
+### Optional transactional Outbox
+
+Install `papilio-tasks[outbox-postgres]` alongside your target Events backend.
+This uses **faststream-outbox 0.21**, PostgreSQL and SQLAlchemy async handles.
+It does not add PostgreSQL, SQLAlchemy or Tenacity to the base installation.
+The application owns tables/migrations, transaction boundaries and its engine;
+the integration adds typed registration, modular routes and a native relay app.
+No Django ORM integration or automatic replacement of an existing outbox is added.
+
+Give the existing typed publisher a stable, versioned storage key:
+
+```python
+# myapp/modules/orders/tasks/publishers.py
+class OrderCreated(JetPublisher[OrderData]):
+    subject = "orders.created"
+    stream = JStream("orders")
+    outbox_key = "orders.created.v1"
+```
+
+The declaration is shared by direct publication, subscribers and durable
+registration. `outbox_key` enables registration only: `OrderCreated.publish(...)`
+continues to publish directly. Do not rename a key or change its target route
+while old records depend on it without an explicit drain/migration strategy.
+
+Configure the native broker once in each process's bootstrap:
+
+```python
+from sqlalchemy import MetaData
+from faststream_outbox import (
+    OutboxBroker, make_outbox_table, make_dlq_table,
+)
+from papilio_tasks.apps.outbox import Outbox
+
+metadata = MetaData()
+pending = make_outbox_table(metadata, table_name="event_outbox")
+dead = make_dlq_table(metadata, table_name="event_outbox_dlq")
+
+outbox_runtime = Outbox(
+    OutboxBroker(engine, outbox_table=pending, dlq_table=dead),
+    modules=("myapp.modules",),
+)
+```
+
+`engine` is an application-owned AsyncEngine. Declare and migrate the native
+tables with your own metadata/Alembic history; construction creates no tables
+and opens no connections. An API that only registers rows may omit the engine
+from OutboxBroker: registration uses the supplied session/connection directly.
+The relay process supplies an engine. Native `validate_schema()` is available
+for explicit schema checks; schema compatibility is not implied by table names.
+
+Existing recursive `publishers.py` / `publishers/` discovery finds declarations
+with non-None keys, including those under module tasks/. Alternatively pass
+`publishers=[OrderCreated]` or call `outbox_runtime.include(OrderCreated)` before
+relay assembly. Repeated classes are idempotent; conflicting/changed keys fail.
+The relay can only process its configured keys; unregistered queues are not
+silently consumed or discarded.
+
+Bind the writer to the **same handle** as the domain writes:
+
+```python
+async with session_factory() as session, session.begin():
+    # Domain writes and any flush needed to obtain generated IDs happen here.
+    writer = outbox_runtime.writer(session)
+    row_id = await writer.append(OrderCreated, OrderData(id=order.id))
+```
+
+AsyncSession and AsyncConnection are supported. The writer requires an active
+transaction; it never begins, flushes, commits, closes or publishes to a bus.
+The returned integer identifies a pending row, not broker acceptance. A rollback
+removes both writes; a separate relay cannot see the uncommitted row. Independent
+tasks require independent handles. Autocommit-mode connections do not provide
+this transactional guarantee and must not be used.
+
+`append_batch(Publisher, events)` inserts a caller-bounded sequence of independent
+events in one native batch. It returns None; empty selections perform no I/O.
+`append(Publisher, list_payload)` still registers one list-shaped event. Native
+payload encoding is retained. Target publication options must be JSON-compatible;
+unsupported native objects fail instead of being stringified. Headers receive a
+UUID `event_id` unless supplied. That header stays stable through relay attempts;
+correlation ID is independent. Do not reuse one event_id for independent events.
+
+#### Direct and Outbox decorators
+
+Use **one publication path** for an event. The native direct decorator remains
+outside the actual commit-owning operation:
+
+```python
+from papilio_tasks.apps.events import publish
+
+@publish(OrderCreated, select=to_event)
+@transactional
+async def create(self, data):
+    return await self.orders.create(data)
+```
+
+This order is correct only if the inner operation owns the final commit. If it
+joins a larger transaction, function success is not commit: move publication to
+the actual outer owner. A commit failure publishes nothing; publication failure
+propagates after the database has committed, without a durable registration.
+
+For durable registration, inject `self.outbox: OutboxWriter` from the same
+operation's session and put the registration decorator **inside** the transaction:
+
+```python
+from papilio_tasks.apps.outbox import decorators as outbox
+
+@transactional
+@outbox.publish(OrderCreated, select=to_event)
+async def create(self, data):
+    return await self.orders.create(data)
+```
+
+`transactional` above is the host's transaction facility (Papilio's native
+decorator when selected), not a new Papilio Tasks transaction manager. Outbox
+decorators support async methods with the explicit constructor-injected
+`self.outbox` contract. Functions/HTTP endpoints can call append directly.
+`outbox.publish_batch(..., select=...)` registers a selected sequence in one batch.
+Both decorators preserve the original result and check the active transaction
+before execution and its identity afterward. Selection/encoding/insert errors
+propagate to the caller's rollback owner. They cannot undo a manual commit:
+decorated operations must not commit or replace their transaction themselves.
+Nested commands work when their writer joins the same real transaction.
+Never stack direct and Outbox decorators for the same publication.
+
+#### FastAPI and Papilio transaction binding
+
+FastAPI can supply the writer through ordinary Depends using the **same**
+session dependency as the operation. Keep domain writes and append inside that
+session's transaction. Finish the actual commit before reporting success; a
+decorator returning before a yield dependency commits is not a commit hook.
+The native faststream-outbox FastAPI OutboxRouter remains available for users
+choosing its direct API; this integration does not replace FastAPI's DI/router.
+
+For Papilio, bind the writer with a request-scoped provider:
+
+```python
+from dishka import Provider, Scope, provide
+from papilio.infra.db.uow import PGUnitOfWork
+from papilio_tasks.apps.outbox import OutboxWriter
+
+class OutboxProvider(Provider):
+    @provide(scope=Scope.REQUEST)
+    def writer(self, unit: PGUnitOfWork) -> OutboxWriter:
+        return outbox_runtime.writer(unit.session)
+```
+
+The native UoW owns session lifetime and transactional joins. The library does
+not import Papilio, replace its providers or locate a container/transaction in
+business code. Neither host starts a relay or event consumer implicitly in HTTP.
+
+#### Explicit relay, durable retries and terminal failures
+
+Construct a normal Events **producer** application for the target routes and
+pass it to the relay; its declarations must already be registered. Each process
+constructs its own applications and resources:
+
+```python
+from papilio_tasks.tools.retry import Backoff, Retry
+
+relay = outbox_runtime.create_relay(
+    producers=(events_producer,),
+    retry=Retry(
+        attempts=10,
+        delay=Backoff(initial=1, multiplier=2, max_delay=60, jitter=True),
+        errors=(ConnectionError, TimeoutError),
+    ),
+    max_workers=2,
+    fetch_batch_size=10,
+    lease_ttl_seconds=60,
+)
+```
+
+Run `papilio_tasks events run myapp.bootstrap:relay`, or use native start/stop
+from your own lifecycle. The adapter delegates claiming, polling, lease recovery,
+durable retry counts, completion and optional DLQ to faststream-outbox. Target
+producer connections open before consumption; missing publisher bindings reject
+startup before claiming. Native shutdown drains/stops the relay before stopping
+its declared producers. Caller-owned engines are not disposed: the host must
+dispose them after relay shutdown, including in its native CLI shutdown hook.
+An assembled/stopped relay is not reusable; construct fresh objects for restart.
+
+`create_relay` forwards native subscriber settings, including max_deliveries and
+retry_strategy. Supply either tools `retry` or native `retry_strategy`, not both;
+omitting both retains the native default policy. Managed relay requires
+NACK_ON_ERROR. Tools attempts include the first completed attempt; native lease
+expiry/reclaims have their separate max_deliveries cap. Native metrics_recorder,
+middlewares and last_exception_renderer are configured on OutboxBroker itself.
+Use native pool-capacity checks: every configured queue retains fetch/worker
+connections, so reserve capacity for your HTTP sessions and monitoring too.
+
+Configure the native DLQ explicitly for terminal failures. Without dlq_table,
+the package deletes terminal failures. Native successful rows are removed;
+failed rows retry until the selected terminal policy applies. DLQ retention,
+inspection and any deliberate replay policy remain application-owned. No
+management HTTP API or automatic retention/replay job is installed.
+
+Relay success means the target's **native publish operation succeeded**, not that
+its subscribers completed. Configure native broker confirmation/routing options
+for the guarantee you need. Native publication hooks run during forwarding on
+the persisted, decoded wire data, which need not be the original DTO instance.
+Crash after publication but before deletion can publish again with the same
+event_id. Delivery is at least once; idempotent consumers or a separate
+transactional Inbox may be needed. External provider side effects still need
+their own idempotency/reconciliation. No Inbox or exactly-once engine is added.
 
 ### Events CLI
 

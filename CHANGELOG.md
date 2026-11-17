@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.4.0 — 2026-11-17
+
+### Added
+
+- Optional `outbox-postgres` integration over native faststream-outbox 0.21.
+  Caller-owned SQLAlchemy sessions/connections register typed events alongside
+  domain writes; single and native batch append never commit or publish.
+- Module-owned stable `Publisher.outbox_key` declarations, existing discovery,
+  explicit registrations and early collision/mutation checks. Ordinary publish
+  remains direct; direct and Outbox decorators are separate choices.
+- Result-preserving `outbox.publish`/`publish_batch` method decorators using an
+  injected writer. Transaction presence/identity checks prevent accidentally
+  registering outside the owning operation; nested rollback remains native.
+- Explicit native FastStream relay applications with producer startup/cleanup,
+  registered-target preflight, native durable retry/DLQ/metrics configuration,
+  shared Retry/Backoff policy adaptation and stable per-event identity headers.
+- Real PostgreSQL commit/rollback, concurrency, retry/DLQ and native FastAPI /
+  Papilio UoW integration checks, plus real Redis delivery and independent CLI
+  crash/restart tests. Relay durability is at least once, not exactly once.
+
 ## 1.3.0 — 2026-11-17
 
 ### Added
