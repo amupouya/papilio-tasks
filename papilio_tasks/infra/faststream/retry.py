@@ -2,14 +2,23 @@
 
 from asyncio import sleep
 from collections.abc import Awaitable, Callable
-from typing import Any
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, cast
 
 from dishka import AsyncContainer
 from faststream import ContextRepo, StreamMessage
 from faststream.exceptions import HandlerException
-from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt
+from tenacity import (
+    AsyncRetrying,
+    RetryCallState,
+    retry_if_exception,
+    stop_after_attempt,
+)
 
 from papilio_tasks.tools.retry import Backoff, Retry
+
+if TYPE_CHECKING:
+    from papilio_tasks.infra.faststream.monitoring import Attempts
 
 
 async def run(
@@ -18,6 +27,8 @@ async def run(
     message: StreamMessage[Any],
     context: ContextRepo,
     execute: Callable[[AsyncContainer], Awaitable[None]],
+    *,
+    subscriber: str = "",
 ) -> None:
     """Execute attempts in independent request scopes, closing before waiting.
 
@@ -27,13 +38,30 @@ async def run(
         message: This delivery's native message.
         context: Native per-task context used by the Dishka integration.
         execute: Subscriber and hook execution inside the fresh scope.
+        subscriber: Stable subscriber name for optional attempt observations.
 
     Raises:
         Exception: The original final or nonmatching error. Native message
             control exceptions and cancellation propagate without retry.
     """
 
+    # Monitoring is explicitly installed via broker middleware. No OTel import
+    # or provider lookup is introduced into ordinary Events installations.
+    observer = cast("Attempts | None", context.get_local("_papilio_attempts"))
+    number = 0
+
     async def attempt() -> None:
+        nonlocal number
+        number += 1
+        observed = (
+            observer.attempt(subscriber, number)
+            if observer is not None
+            else nullcontext()
+        )
+        with observed:
+            await scoped()
+
+    async def scoped() -> None:
         async with container(
             {
                 StreamMessage: message,
@@ -43,6 +71,12 @@ async def run(
         ) as scope:
             with context.scope("dishka", scope):
                 await execute(scope)
+
+    def before_sleep(state: RetryCallState) -> None:
+        if observer is not None and state.next_action is not None:
+            observer.retry(
+                subscriber, state.attempt_number, state.next_action.sleep
+            )
 
     retrying = AsyncRetrying(
         stop=stop_after_attempt(policy.attempts),
@@ -59,5 +93,6 @@ async def run(
         ),
         sleep=sleep,
         reraise=True,
+        before_sleep=before_sleep,
     )
     await retrying(attempt)

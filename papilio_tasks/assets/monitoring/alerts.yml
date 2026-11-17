@@ -1,0 +1,31 @@
+groups:
+  - name: papilio-tasks
+    rules:
+      - alert: PapilioCollectorUnavailable
+        expr: up{job="papilio-collector"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Monitoring collector cannot be scraped
+      - alert: PapilioTaskAttemptsFailing
+        expr: sum by (service_name, task_name) (increase(task_errors_total[5m])) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Repeated Taskiq attempt failures
+      - alert: PapilioOutboxTerminalFailures
+        expr: sum by (service_name, queue) (increase(papilio_tasks_outbox_outcomes_total{outcome="nacked_terminal"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox rows failed terminally
+      - alert: PapilioOutboxLagSampleStale
+        expr: time() - faststream_outbox_queue_lag_last_success_timestamp_seconds > 120
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Native Outbox lag observation is stale or unavailable

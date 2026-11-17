@@ -2462,6 +2462,248 @@ budget; `attempts=3` is not a global lifetime bound across deliveries. Pub/Sub,
 Core NATS and destructive list reads gain no crash recovery from this feature.
 Choose native redelivery/recovery and terminal dead-letter behavior explicitly.
 
+### Optional monitoring
+
+Install only the telemetry integrations used by the process:
+
+```bash
+pip install 'papilio-tasks[monitoring-taskiq]'  # scheduler and projection
+pip install 'papilio-tasks[monitoring-events,events-redis]'  # choose transport
+pip install 'papilio-tasks[monitoring-outbox]'  # PostgreSQL relay
+```
+
+The base installation remains dependency-free. Monitoring is explicitly enabled
+in bootstrap, without adding decorators or changing module/task discovery. The
+host owns its OpenTelemetry providers, resource identity, exporters, sampling,
+authentication, retention and process lifecycle. Existing providers can be reused;
+the library does not set global providers or start an HTTP server/exporter.
+
+For example, configure native batched OTLP/HTTP exporters once **per process**:
+
+```python
+from uuid import uuid4
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from papilio_tasks.tools.monitoring import Monitoring
+
+resource = Resource.create({
+    "service.name": "messaging-worker",
+    "service.version": "your-application-version",
+    "service.instance.id": str(uuid4()),
+    "deployment.environment.name": "development",
+})
+traces = TracerProvider(resource=resource)
+traces.add_span_processor(BatchSpanProcessor(
+    OTLPSpanExporter(endpoint="http://127.0.0.1:4318/v1/traces", timeout=2),
+    max_queue_size=2048,
+    max_export_batch_size=512,
+))
+metrics = MeterProvider(resource=resource, metric_readers=[
+    PeriodicExportingMetricReader(
+        OTLPMetricExporter(endpoint="http://127.0.0.1:4318/v1/metrics", timeout=2),
+        export_interval_millis=15000,
+        export_timeout_millis=3000,
+    ),
+])
+monitoring = Monitoring(traces, metrics)
+```
+
+Use the actual collector address for your deployment. An OTLP collector is
+optional: native SDK exporters/readers for an existing backend work as well.
+Initialize process-owned providers with the worker's process lifecycle; do not
+share live exporter resources across independently managed processes. SDK-native
+batch queues bound span buffering; sampling, metric Views/cardinality limits and
+backend retention belong to the host. Export loss during an outage is possible;
+monitoring is not a durable execution journal.
+
+Instrument native brokers **before startup**, alongside their ordinary assembly:
+
+```python
+monitoring.taskiq(scheduler_broker)
+monitoring.taskiq(projection_broker)
+
+from faststream.redis.opentelemetry import RedisTelemetryMiddleware
+monitoring.faststream(native_redis_broker, RedisTelemetryMiddleware)
+```
+
+Pass the native broker, not Papilio Tasks' transport wrapper. For other Events
+transports use `RabbitTelemetryMiddleware`, `KafkaTelemetryMiddleware` or
+`NatsTelemetryMiddleware` from the corresponding native
+`faststream.<transport>.opentelemetry` module. Equivalent repeated helper
+installation is idempotent; different provider configurations are rejected.
+Do not also attach native telemetry or global auto-instrumentation to the same
+broker. Modules keep their existing declarations, providers and retry policies.
+
+For a **NATS-only** scheduler/projection setup, no Redis backend or service is
+required. Keep your existing native JetStream brokers/registrars and select the
+native NATS KV source for durable delayed retries:
+
+```python
+from taskiq_nats import NATSKeyValueScheduleSource
+from papilio_tasks.apps.taskiq import RetryRuntime
+from papilio_tasks.apps.schedulers.application import create_broker as jobs_broker
+from papilio_tasks.apps.projections.application import create_broker as projects_broker
+
+retry = RetryRuntime(source=NATSKeyValueScheduleSource(
+    "nats://127.0.0.1:4222", bucket_name="application_retry",
+))
+jobs = jobs_broker(
+    registrar=nats_jobs, providers=job_providers, modules=module_roots, retry=retry,
+)
+projects = projects_broker(
+    registrar=nats_projects, providers=project_providers,
+    modules=module_roots, retry=retry,
+)
+monitoring.taskiq(jobs)
+monitoring.taskiq(projects)
+retry_beat = retry.create_beat(brokers=[jobs, projects])
+```
+
+Here `nats_jobs` and `nats_projects` are the native NatsRegistrars described in
+the NATS backend section; each retains its own configured JetStream transport.
+Install `scheduler-nats`, `projection-nats` and `monitoring-taskiq`. Run one
+logical native retry beat for the shared source and retain the ordinary schedule
+beat for recurring declarations. Task names across the shared source must be
+unique. The queue transport, writable retry source and optional result backend
+are independent choices. `RetryRuntime.immediate()` instead needs no source or
+beat and requires a fixed zero delay. Generic `MutableSource` and native writable
+`ScheduleSource` contracts remain available for other stores. No Redis import is
+introduced by NATS registration, retry or monitoring.
+
+Taskiq's native metrics cover sends, attempt successes/errors, execution/wait
+histograms and process-local active attempts. Task names retain module identity;
+the dashboard filters services and groups tasks. Task IDs are trace attributes,
+never metric labels. The adapter closes execution spans at `post_execute`, so
+retry attempts with `NoResultError` still finish. Each failed attempt is marked
+as an error even if another attempt succeeds. Producer calls propagate the current
+trace without opening a producer send span: Taskiq has no send-failure hook to
+reliably close such a span. Success means task execution returned, not that result
+storage succeeded or an external business operation completed. Native retry flags
+are configuration hints, not proof of a successfully scheduled retry or exhaustion.
+
+FastStream uses native transport spans and metrics. `event_id` and `correlation_id`
+are attached to processing spans when present. Retry-enabled subscribers additionally
+emit `papilio_tasks.subscriber.attempts`, `.errors` and `.retries`, with stable
+subscriber names. The last counter observes retry selection before sleep; a later
+cancellation can prevent that attempt. Native delivery metrics count one outer
+execution, while these counters count local Tenacity attempts. Native control
+exceptions/cancellation still propagate. Normal subscribers require no retry extra.
+Batch messaging can start new consumer traces with **span links** to producer
+traces, following native semantics; correlation does not require one trace ID.
+
+Arguments, results and message bodies are not added by this integration. Native
+instrumentation records exception diagnostics, which may include exception text
+and stack traces; apply your host's export/filtering policy to sensitive diagnostics.
+Avoid putting user/event IDs into resource attributes, queue names or task names.
+
+For Outbox, pair native middleware with the recorder:
+
+```python
+from faststream_outbox import OutboxBroker
+from faststream_outbox.opentelemetry import OutboxTelemetryMiddleware
+
+native_outbox = OutboxBroker(
+    engine, outbox_table=table, dlq_table=dlq,
+    metrics_recorder=monitoring.outbox_recorder(),
+)
+monitoring.faststream(native_outbox, OutboxTelemetryMiddleware)
+# Pass native_outbox to the existing Outbox(...) assembly.
+```
+
+Bus metrics are recorded once by native middleware. The recorder retains native
+fetch/lease/DLQ/drain observations and adds `papilio_tasks.outbox.outcomes` with
+`acked`, `nacked_retried` and `nacked_terminal`. Those outcomes reflect persisted
+native relay decisions, independently of downstream consumer completion. DLQ
+writes are not the current number of retained DLQ rows. No replay/cleanup API or
+Inbox persistence is introduced by monitoring.
+
+For **oldest claimable age and sample freshness**, the selected native package
+currently provides a Prometheus sampler. Use its recorder **instead of** the OTel
+recorder above when enabling this optional sampling path:
+
+```python
+from prometheus_client import CollectorRegistry
+from faststream_outbox.metrics.prometheus import PrometheusRecorder
+
+registry = CollectorRegistry()
+recorder = PrometheusRecorder(
+    registry=registry,
+    include_bus_metrics=False,  # native OTel middleware still owns bus metrics
+    queue_lag_interval_seconds=15,
+)
+native_outbox = OutboxBroker(engine, outbox_table=table, metrics_recorder=recorder)
+monitoring.faststream(native_outbox, OutboxTelemetryMiddleware)
+```
+
+Expose `registry` using the host's native Prometheus integration and add that
+endpoint to your Prometheus scrape configuration with appropriate access control.
+The native relay starts/stops its sampler, borrows the engine and reports
+`faststream_outbox_oldest_due_message_age_seconds` and
+`faststream_outbox_queue_lag_last_success_timestamp_seconds`. It excludes future
+scheduled and currently leased rows. Interpret age only with a fresh successful
+sample; unavailable/stale observations are not zero backlog. This alternative
+exports internal recorder metrics in native Prometheus names and does not emit
+`papilio_tasks.outbox.outcomes`; the corresponding OTel-only panels remain empty.
+No polling implementation or inspection consumer is added to Papilio Tasks.
+
+After all brokers have drained/stopped, the host flushes/shuts down its shared
+providers once. These synchronous native SDK operations can run outside the
+async event loop:
+
+```python
+import asyncio
+await asyncio.gather(
+    asyncio.to_thread(traces.shutdown),
+    asyncio.to_thread(metrics.shutdown),
+)
+```
+
+Broker shutdown never closes borrowed providers, so other applications using them
+can continue exporting. Batched exporter failures do not turn successful jobs into
+failed jobs, trigger retries or change acknowledgements. Custom processors/readers
+are host code and must obey the native SDK contract.
+
+A ready **local development** stack (Collector, Prometheus, Tempo, Grafana),
+provisioned dashboard and example alert rules ship inside the wheel/sdist. Copy
+them into a new directory using native package resources:
+
+```python
+from importlib.resources import as_file, files
+from shutil import copytree
+
+with as_file(files("papilio_tasks").joinpath("assets/monitoring")) as assets:
+    copytree(assets, "monitoring")
+```
+
+```bash
+docker compose -f monitoring/compose.yml up -d
+# Grafana: http://127.0.0.1:3000/d/papilio-tasks
+# OTLP/HTTP: http://127.0.0.1:4318
+# Stop without deleting stored metrics/traces:
+docker compose -f monitoring/compose.yml down
+```
+
+The example binds host ports to loopback and enables anonymous Grafana viewing
+for local development. Existing ports, deployment authentication/TLS, image
+updates, thresholds, resource budgets and retention are application choices.
+Metrics retain three days and traces twenty-four hours in the example. Import the
+packaged dashboard into an existing Grafana by using the provided datasource UIDs
+`papilio-prometheus` and `papilio-tempo`. Alert rules are evaluated by Prometheus;
+external notifications require the host's Alertmanager configuration.
+
+Empty panels mean unavailable/unobserved data, not healthy or successful work.
+Collector scrape health is not worker liveness. Native active counters and missing
+task results are not a broker-independent queue inspector. Traces follow sampling
+and retention and cannot promise a complete per-job history or exactly-once work.
+Current `taskiq-dashboard` 0.5.2 requires Taskiq >=0.13; this release deliberately
+retains Taskiq <0.13 and does not install that incompatible admin panel. The
+Grafana/Tempo path works independently of an application HTTP framework.
+
 ### Optional transactional Outbox
 
 Install `papilio-tasks[outbox-postgres]` alongside your target Events backend.

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.5.0 — 2026-11-17
+
+- Optional OpenTelemetry monitoring for scheduler/projection, Events and Outbox
+  using shared host-owned providers and native instrumentation.
+- NATS-safe text telemetry headers and real NATS-only scheduler/projection,
+  shared KV retry-source and Events monitoring coverage without Redis.
+- Idempotent broker instrumentation, stable execution/event trace lookup,
+  native batch links and distinct local retry/durable relay outcome counters.
+- Taskiq attempt spans close even when retries omit result storage; failed-send
+  propagation does not retain a producer context. FastStream restores caller
+  context through failures/cancellation. Existing retry/ack behavior is retained.
+- Packaged local Collector/Prometheus/Tempo/Grafana stack, provisioned dashboard,
+  example alerts and native Outbox lag/freshness configuration.
+- Base dependencies remain empty. Monitoring owns no HTTP service, persistence,
+  providers, replay engine or application framework. DLQ management/Inbox remain
+  separate capabilities.
+
 ## 1.4.0 — 2026-11-17
 
 ### Added

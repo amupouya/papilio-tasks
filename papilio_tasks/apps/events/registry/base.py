@@ -171,7 +171,14 @@ class Registrar(ABC):
                 if self.container is None:
                     raise RuntimeError("Subscriber retry requires create_app")
                 context = await _scope.get(ContextRepo)
-                await retry(policy, self.container, _message, context, attempt)
+                await retry(
+                    policy,
+                    self.container,
+                    _message,
+                    context,
+                    attempt,
+                    subscriber=f"{cls.__module__}.{cls.__qualname__}",
+                )
 
             retried.__annotations__ = {
                 "event": hints["event"],

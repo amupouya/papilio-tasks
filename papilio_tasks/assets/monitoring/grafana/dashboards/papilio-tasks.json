@@ -1,0 +1,637 @@
+{
+  "uid": "papilio-tasks",
+  "title": "Papilio Tasks",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "tags": [
+    "papilio",
+    "taskiq",
+    "faststream"
+  ],
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "papilio-prometheus"
+        },
+        "definition": "label_values(target_info, service_name)",
+        "query": {
+          "query": "label_values(target_info, service_name)",
+          "refId": "services"
+        },
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Taskiq successful attempts / second",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (task_name) (rate(task_success_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{task_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Taskiq failed attempts / second",
+      "description": "Attempt errors include retries; this does not count distinct failed jobs.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (task_name) (rate(task_errors_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{task_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Taskiq executing attempts",
+      "description": "Process-local observed executions. This is not durable worker liveness or broker backlog.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (task_name) (worker_active_tasks{service_name=~\"$service\"})",
+          "legendFormat": "{{task_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Taskiq execution p95",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, task_name) (rate(task_execution_time_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "{{task_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Taskiq observed wait p95",
+      "description": "Sender/worker clocks must be synchronized; scheduled retries include intentional delay.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, task_name) (rate(task_wait_time_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "{{task_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "FastStream / Outbox delivery executions",
+      "description": "Delivery count includes redelivery. Local Tenacity attempts are shown separately.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (messaging_system, messaging_destination_publish_name) (rate(messaging_process_duration_seconds_count{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{messaging_system}} {{messaging_destination_publish_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "FastStream / Outbox execution p95",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, messaging_system) (rate(messaging_process_duration_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "{{messaging_system}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "FastStream / Outbox delivery errors",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (messaging_system, error_type) (rate(messaging_process_duration_seconds_count{service_name=~\"$service\",error_type!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{messaging_system}} {{error_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Local subscriber attempts",
+      "description": "Only retry-enabled subscribers report local attempt counters.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (subscriber) (rate(papilio_tasks_subscriber_attempts_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{subscriber}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Local subscriber retries selected",
+      "description": "Retry selected before sleep; cancellation can prevent the next attempt.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (subscriber) (rate(papilio_tasks_subscriber_retries_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{subscriber}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Outbox durable outcomes",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (queue, outcome) (rate(papilio_tasks_outbox_outcomes_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{queue}} {{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Outbox DLQ writes",
+      "description": "Opt-in native DLQ writes; this is not the number of rows retained in the DLQ.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (messaging_destination_name) (rate(messaging_outbox_dlq_written_event_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{messaging_destination_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Outbox oldest claimable age",
+      "description": "Optional native Prometheus lag sampler. In-flight and future scheduled rows are excluded. Missing data is unavailable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "faststream_outbox_oldest_due_message_age_seconds",
+          "legendFormat": "{{table}} {{queue}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Outbox lag observation age",
+      "description": "Interpret lag only while this observation is fresh. Labels identify table and queue.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - faststream_outbox_queue_lag_last_success_timestamp_seconds",
+          "legendFormat": "{{table}} {{queue}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Native successful publish calls",
+      "description": "Native publication calls, including pre-commit Outbox inserts. Not downstream completion or recipient delivery.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (messaging_system) (rate(messaging_publish_duration_seconds_count{service_name=~\"$service\",error_type=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{messaging_system}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "id": 15,
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Native publish errors",
+      "description": "Native publication calls, including pre-commit Outbox inserts. Not downstream completion or recipient delivery.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (messaging_system) (rate(messaging_publish_duration_seconds_count{service_name=~\"$service\",error_type!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{messaging_system}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "id": 16,
+      "gridPos": {
+        "x": 12,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 17,
+      "type": "text",
+      "title": "Inspect an execution",
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Open **Explore \u2192 Papilio Traces**. Search `messaging.message.id` for a Taskiq ID or `papilio_tasks.event_id` for a durable event. Batch consumers can use span links across traces. Traces follow configured sampling and retention; missing traces do not prove a job is pending, failed, or successful. These panels observe execution and publication, not business outcomes or recipient delivery."
+      }
+    }
+  ]
+}
