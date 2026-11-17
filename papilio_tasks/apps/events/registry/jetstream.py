@@ -88,7 +88,7 @@ class JetRegistrar(Registrar):
             if not isinstance(policy, AckPolicy):
                 raise TypeError("Expected AckPolicy or None")
             options["ack_policy"] = policy
-        handler = self.handler(cls)
+        handler = self.handler(cls, ack_policy=options.get("ack_policy"))
         self.broker.subscriber(
             selected,
             stream=deepcopy(stream),

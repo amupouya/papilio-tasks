@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 — 2026-11-17
+
+### Added
+
+- Optional Events `Subscriber.retry` policies through `events-retry` and
+  Tenacity. Total per-delivery attempts, exception filters, fixed delays and
+  capped/jittered Backoff reuse the existing immutable tools policies.
+- Each attempt constructs fresh request-scoped dependencies and runs subscriber
+  hooks; cleanup finishes before waiting. Cancellation and native message-control
+  exceptions propagate. Only the failing subscriber repeats, without republishing.
+- Managed retry rejects ACK_FIRST/MANUAL, including registrar and broker defaults.
+  Kafka requires an explicit compatible acknowledgement policy. Native terminal
+  handling stays selected by the caller; broker redelivery starts a new budget.
+
 ## 1.2.0 — 2026-11-16
 
 ### Added

@@ -53,7 +53,7 @@ class NatsRegistrar(Registrar):
         group = cls.queue if queue is None else queue
         if not isinstance(group, str):
             raise TypeError("Expected a NATS queue group string")
-        handler = self.handler(cls)
+        handler = self.handler(cls, ack_policy=options.get("ack_policy"))
         self.broker.subscriber(
             selected, queue=group, no_reply=True, **options
         )(handler)

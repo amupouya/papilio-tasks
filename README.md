@@ -1812,7 +1812,7 @@ backoff or attempt budget.
 
 `publish` returns the native publication result, not subscriber results. It does
 not guarantee business processing or turn database commits and sends into a
-transaction. Native errors propagate; this layer adds no retry policy. Optional
+transaction. Native errors propagate. Opt-in short retries are described below. Optional
 app-wide publication and subscriber hooks are described below.
 Broker confirmation and unroutable-message behavior depend on the selected native
 channel/options, just as in the infrastructure adapter.
@@ -2411,6 +2411,50 @@ Live tests cover offline backlog, push/pull/batch decoding, native publish ACKs
 and errors, manual and automatic ACKs, bounded redelivery, shared durable workers
 and independent consumers, module discovery, DI/hooks/decorator, and CLI cleanup.
 They do not establish restart/cluster durability or exactly-once side effects.
+
+### Short subscriber retries
+
+Install `papilio-tasks[events-retry]` alongside the selected Events backend.
+Ordinary Events imports and subscribers without a policy do not need Tenacity.
+
+```python
+from papilio_tasks.tools.retry import Backoff, Retry
+
+class Finance(RabbitSubscriber[OrderData]):
+    publisher = OrderCreated
+    queue = RabbitQueue("finance")
+    retry = Retry(
+        attempts=3,
+        delay=Backoff(initial=1, multiplier=2, max_delay=5, jitter=True),
+        errors=(ConnectionError, TimeoutError),
+    )
+
+    async def run(self, event: OrderData) -> None:
+        ...
+```
+
+`retry` is inherited; `retry = None` disables it. Attempts include the first
+execution **within this delivery**. Only the failed subscriber repeats; no event
+is republished. Each attempt resolves a new Subscriber and fresh request-scoped
+dependencies, runs the subscribe hooks, and closes that scope before waiting.
+An `after_run` failure can repeat successful business work: handlers and their
+effects must tolerate repetition. Suppressed hook errors do not trigger retry.
+
+The original final/nonmatching exception reaches native acknowledgement handling.
+Cancellation and FastStream message-control exceptions (`NackMessage`,
+`RejectMessage`, `AckMessage`) are never retried. ACK_FIRST and MANUAL conflict
+with managed retry and are rejected, including explicit registration and broker
+settings. Kafka's default ACK_FIRST is also rejected: explicitly select a
+compatible policy and group/offset configuration. Existing no-policy behavior
+is unchanged.
+
+Waiting is asynchronous but occupies this subscriber's processing capacity; keep
+total execution below the selected broker acknowledgement/consumer timeouts.
+This is short in-process retry, without source, beat or durable attempt history.
+A restart loses its local counter/wait. Native NACK redelivery can start a fresh
+budget; `attempts=3` is not a global lifetime bound across deliveries. Pub/Sub,
+Core NATS and destructive list reads gain no crash recovery from this feature.
+Choose native redelivery/recovery and terminal dead-letter behavior explicitly.
 
 ### Events CLI
 

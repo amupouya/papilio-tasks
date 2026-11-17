@@ -56,7 +56,7 @@ class ChannelRegistrar(Registrar):
             raise TypeError("Expected PubSub or None")
         if not selected.name:
             raise ValueError("Subscriber requires a named Redis channel")
-        handler = self.handler(cls)
+        handler = self.handler(cls, ack_policy=options.get("ack_policy"))
         self.broker.subscriber(deepcopy(selected), no_reply=True, **options)(
             handler
         )

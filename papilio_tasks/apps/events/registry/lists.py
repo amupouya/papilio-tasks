@@ -56,7 +56,7 @@ class ListRegistrar(Registrar):
             raise TypeError("Expected ListSub or None")
         if selected.name != name:
             raise ValueError("Subscriber list conflicts with publisher route")
-        handler = self.handler(cls)
+        handler = self.handler(cls, ack_policy=options.get("ack_policy"))
         self.broker.subscriber(
             list=deepcopy(selected), no_reply=True, **options
         )(handler)

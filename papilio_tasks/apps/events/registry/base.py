@@ -2,11 +2,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from inspect import isabstract, iscoroutinefunction, signature
 from types import MappingProxyType
-from typing import Any, get_type_hints
+from typing import Any, cast, get_type_hints
 from weakref import WeakSet
 
 from dishka import AsyncContainer
 from dishka_faststream import FromDishka, inject
+from faststream import AckPolicy, ContextRepo, StreamMessage
 
 from papilio_tasks.infra.faststream.brokers.contracts.base import (
     BrokerContract,
@@ -17,6 +18,7 @@ from papilio_tasks.tools.hooks.subscribe import (
     SubscribeHooks,
 )
 from papilio_tasks.tools.hooks.subscribe import run as run_hooks
+from papilio_tasks.tools.retry import Retry
 
 from ..publishers import bindings
 from ..publishers.base import Publisher
@@ -86,7 +88,13 @@ class Registrar(ABC):
 
         return execute
 
-    def handler(self, cls: type[Subscriber[Any]]) -> Any:
+    def handler(
+        self,
+        cls: type[Subscriber[Any]],
+        *,
+        ack_policy: AckPolicy | None = None,
+        default_ack: AckPolicy | None = None,
+    ) -> Any:
         self.check_open()
         if cls in self._subscribers:
             raise ValueError(
@@ -126,6 +134,53 @@ class Registrar(ABC):
             "_scope": FromDishka[AsyncContainer],
             "return": None,
         }
+
+        policy = cls.retry
+        if policy is not None:
+            if not isinstance(policy, Retry):
+                raise TypeError("Subscriber.retry must be Retry or None")
+            selected = (
+                ack_policy
+                if ack_policy is not None
+                else cast(Any, self.broker.native).config.ack_policy
+            )
+            if not isinstance(selected, AckPolicy):
+                selected = default_ack
+            if selected in (AckPolicy.ACK_FIRST, AckPolicy.MANUAL):
+                raise ValueError(
+                    "Subscriber retry requires ack after execution; "
+                    "ack_policy ACK_FIRST and MANUAL are incompatible"
+                )
+            # Ordinary Events imports must not require optional Tenacity.
+            try:
+                from papilio_tasks.infra.faststream.retry import run as retry
+            except ModuleNotFoundError as error:
+                if error.name == "tenacity":
+                    raise ImportError(
+                        "Subscriber retry requires papilio-tasks[events-retry]"
+                    ) from error
+                raise
+
+            async def retried(
+                event: Any, *, _message: StreamMessage, _scope: AsyncContainer
+            ) -> None:
+                async def attempt(scope: AsyncContainer) -> None:
+                    subscriber = await scope.get(cls)
+                    await execute(event, _subscriber=subscriber, _scope=scope)
+
+                if self.container is None:
+                    raise RuntimeError("Subscriber retry requires create_app")
+                context = await _scope.get(ContextRepo)
+                await retry(policy, self.container, _message, context, attempt)
+
+            retried.__annotations__ = {
+                "event": hints["event"],
+                "_message": FromDishka[StreamMessage],
+                "_scope": FromDishka[AsyncContainer],
+                "return": None,
+            }
+
+            return inject(retried)
         return inject(execute)
 
     def close(self) -> None:

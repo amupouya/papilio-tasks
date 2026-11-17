@@ -56,7 +56,11 @@ class KafkaRegistrar(Registrar):
             if not isinstance(policy, AckPolicy):
                 raise TypeError("Expected AckPolicy or None")
             options["ack_policy"] = policy
-        handler = self.handler(cls)
+        handler = self.handler(
+            cls,
+            ack_policy=options.get("ack_policy"),
+            default_ack=AckPolicy.ACK_FIRST,
+        )
         self.broker.subscriber(
             topic, group_id=cls.group_id, no_reply=True, **options
         )(handler)
