@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1 — 2026-11-17
+
+- Allow database connection setup in the native Outbox lag sampling test on
+  hosted runners. Runtime monitoring and transport behavior are unchanged.
+
 ## 1.5.0 — 2026-11-17
 
 - Optional OpenTelemetry monitoring for scheduler/projection, Events and Outbox

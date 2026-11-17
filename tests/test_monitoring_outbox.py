@@ -181,7 +181,9 @@ async def test_native_lag_sampler_freshness_and_cleanup(database):
     recorder = PrometheusRecorder(
         registry=registry,
         include_bus_metrics=False,
-        queue_lag_interval_seconds=0.02,
+        # Native sampling also uses this interval as its database timeout.
+        # Allow connection setup on hosted runners instead of imposing 20 ms.
+        queue_lag_interval_seconds=1,
     )
     native = OutboxBroker(
         engine, outbox_table=table, metrics_recorder=recorder, logger=None
@@ -220,7 +222,7 @@ async def test_native_lag_sampler_freshness_and_cleanup(database):
         await native.start()
         await asyncio.wait_for(started.wait(), 5)
         await AsyncRetrying(
-            stop=stop_after_delay(5), wait=wait_fixed(0.01), reraise=True
+            stop=stop_after_delay(10), wait=wait_fixed(0.05), reraise=True
         )(fresh)
     finally:
         blocked.set()
