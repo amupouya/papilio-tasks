@@ -691,12 +691,84 @@
       }
     },
     {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Inbox claim SQL decisions / second",
+      "description": "Native claim decisions. Claimed does not mean the host transaction committed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 72,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scope, outcome) (rate(papilio_tasks_inbox_claims_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{scope}} {{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Inbox claim p95 latency",
+      "description": "Native claim SQL latency, including time waiting on a competing transaction.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "papilio-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 72,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, scope) (rate(papilio_tasks_inbox_claim_duration_seconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "{{scope}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
       "id": 17,
       "type": "text",
       "title": "Inspect an execution",
       "gridPos": {
         "x": 0,
-        "y": 72,
+        "y": 80,
         "w": 24,
         "h": 4
       },

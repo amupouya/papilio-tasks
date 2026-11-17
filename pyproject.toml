@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "papilio-tasks"
-version = "1.6.0"
+version = "1.7.0"
 description = "Scheduling, projection and event tools in the Papilio family"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -41,6 +41,7 @@ projection-kafka = ["papilio-tasks[projection]", "taskiq-aio-kafka>=1,<2", "kafk
 events = ["faststream[cli]>=0.7.5,<0.8", "dishka-faststream>=0.7,<0.8"]
 events-retry = ["papilio-tasks[events]", "tenacity>=9,<10"]
 outbox-postgres = ["papilio-tasks[events]", "faststream-outbox[asyncpg]>=0.21,<0.22"]
+inbox-postgres = ["sqlalchemy-inbox>=0.2,<0.3", "asyncpg>=0.31,<1"]
 events-rabbit = ["papilio-tasks[events]", "faststream[rabbit]>=0.7.5,<0.8"]
 events-kafka = ["papilio-tasks[events]", "faststream[kafka]>=0.7.5,<0.8"]
 events-redis = ["papilio-tasks[events]", "faststream[redis]>=0.7.5,<0.8"]

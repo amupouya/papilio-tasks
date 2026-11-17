@@ -10,6 +10,7 @@ from urllib.request import urlopen
 import pytest
 
 pytest.importorskip("opentelemetry.sdk")
+pytest.importorskip("sqlalchemy_inbox")
 
 from faststream.rabbit import RabbitBroker, TestRabbitBroker
 from faststream.rabbit.opentelemetry import RabbitTelemetryMiddleware
@@ -24,9 +25,12 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import AsyncSession
 from taskiq import InMemoryBroker
 from tenacity import AsyncRetrying, stop_after_delay, wait_fixed
 
+from papilio_tasks.apps.inbox import make_inbox_table
 from papilio_tasks.infra.faststream.dlq_monitoring import Observer
 from papilio_tasks.tools.monitoring import Monitoring
 
@@ -117,6 +121,12 @@ async def test_packaged_stack_exports_queries_and_provisions_dashboard():
         # transaction and concurrency semantics live in test_dead_letters.
         with Observer(monitoring).operation("list", "stack") as operation:
             operation.set_attribute("papilio_tasks.dlq.rows", 0)
+        # Exercise the native validation path for wire names without a DB.
+        # Success, duplicates and commit semantics are tested in PostgreSQL.
+        async with AsyncSession() as session:
+            inbox = monitoring.inbox(session, make_inbox_table(MetaData()))
+            with pytest.raises(RuntimeError, match="transaction"):
+                await inbox.claim(scope="stack", message_id="stable-event")
         await asyncio.gather(
             asyncio.to_thread(tracer.force_flush),
             asyncio.to_thread(meter.force_flush),
@@ -143,6 +153,8 @@ async def test_packaged_stack_exports_queries_and_provisions_dashboard():
                 "messaging_outbox_dlq_written_event_total",
                 "papilio_tasks_dlq_operations_total",
                 "papilio_tasks_dlq_operation_duration_seconds_count",
+                "papilio_tasks_inbox_claims_total",
+                "papilio_tasks_inbox_claim_duration_seconds_count",
             )
             samples = await asyncio.gather(
                 *(

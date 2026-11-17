@@ -12,6 +12,8 @@ from opentelemetry.metrics import MeterProvider
 from opentelemetry.trace import TracerProvider
 
 if TYPE_CHECKING:
+    from sqlalchemy import Table
+    from sqlalchemy_inbox import Inbox, SessionOrConnection
     from taskiq import AsyncBroker
 
     from papilio_tasks.infra.faststream.monitoring import Broker
@@ -32,6 +34,17 @@ class Monitoring:
 
     tracer_provider: TracerProvider
     meter_provider: MeterProvider
+
+    def inbox(self, session: "SessionOrConnection", table: "Table") -> "Inbox":
+        """Build an observed native Inbox on the caller's SQL handle.
+
+        No session, transaction or worker is started. Claim outcomes reflect
+        SQL decisions; the host still owns commit, rollback and delivery ack.
+        """
+        # SQLAlchemy/Inbox remain optional for other monitoring integrations.
+        from papilio_tasks.infra.sqlalchemy.inbox import Inbox
+
+        return Inbox(session, table, self)
 
     def taskiq(self, broker: "AsyncBroker") -> "Middleware":
         """Instrument one native scheduler/projection broker before startup.

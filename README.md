@@ -2908,7 +2908,8 @@ the persisted, decoded wire data, which need not be the original DTO instance.
 Crash after publication but before deletion can publish again with the same
 event_id. Delivery is at least once; idempotent consumers or a separate
 transactional Inbox may be needed. External provider side effects still need
-their own idempotency/reconciliation. No Inbox or exactly-once engine is added.
+their own idempotency/reconciliation. Outbox alone does not install an Inbox;
+the optional native integration is described below.
 
 ### Outbox dead-letter management
 
@@ -2997,6 +2998,114 @@ filtering policy. Success records a completed **SQL operation**, including an
 empty result; it is not proof of host commit, retained pending rows or completed
 delivery. The packaged dashboard includes management activity and replay SQL
 error panels. Omit `monitoring` to use this service without OpenTelemetry.
+
+### Transactional Inbox
+
+Install `papilio-tasks[inbox-postgres]`. This optional capability uses
+[`sqlalchemy-inbox`](https://github.com/modern-python/sqlalchemy-inbox) 0.2
+directly: `Inbox`, `InboxCleaner`, `CleanupResult`, `SessionOrConnection` and
+`make_inbox_table` from `papilio_tasks.apps.inbox` are the native objects.
+No duplicate ledger, SQL implementation, worker, dependency-injection framework
+or transaction/retry engine is added. The extra needs SQLAlchemy and asyncpg;
+FastStream, Taskiq, Redis, FastAPI, Papilio and OpenTelemetry are not required.
+
+Attach the native table to the host's metadata and create its Alembic migration:
+
+```python
+from papilio_tasks.apps.inbox import Inbox, make_inbox_table
+
+received = make_inbox_table(metadata, table_name="received_events")
+
+async def apply_order(session, event_id: str, order_id: int) -> bool:
+    inbox = Inbox(session, received)
+    async with session.begin():
+        if not await inbox.claim(
+            scope="orders.apply.v1", message_id=event_id,
+        ):
+            return False
+        await session.execute(insert(orders).values(id=order_id))
+    return True
+```
+
+`scope` is a stable, explicit logical consumer identity; use a different scope
+for another consumer that must process the same event. Do not derive it from a
+refactorable Python path, deployment instance or queue name. `message_id` is the
+stable `event_id` supplied by your producer, including the header preserved by
+Outbox and DLQ replay. Both native fields are nonempty strings of at most 255
+characters. Missing IDs must be rejected or explicitly handled by the host;
+there is no generated ID, body hash or transport-offset fallback.
+
+Claim **before** guarded business writes. Native `claim` returns `True` when the
+transaction inserts the marker and `False` for an existing key; the caller must
+skip the business operation on `False`. The marker and business writes share
+the same PostgreSQL transaction. Native Inbox neither begins nor commits it.
+Business failures and cancellation must escape the owning transaction boundary,
+or the host must roll it back. Catching a handler error and committing its marker
+would make the next delivery look processed. If catching a failure inside a
+larger transaction, put both claim and guarded writes inside the same caller-
+owned savepoint. Native SQLAlchemy session/savepoint flush behavior still applies.
+
+Competing claims for one key wait for the first transaction. At READ COMMITTED,
+the second skips a committed marker or claims after rollback. Stricter database
+isolation can raise serialization errors; the host's existing retry policy owns
+whole-transaction retries. A fresh delivery after commit is skipped even if the
+previous worker exited before acknowledging. A worker exit before commit leaves
+the event claimable again. Commit must finish **before** the subscriber returns
+and the native broker acknowledges it. Inbox does not choose ack/retry policies
+or create a redelivery. Keep native retry and transaction ownership explicit.
+
+For FastAPI or Papilio, provide native `Inbox(session, received)` from the same
+request-scoped, cached SQL session / `unit.session` as the operation. For Papilio,
+the existing `@transactional` method can own the outer transaction, so the method
+calls `claim` and writes directly without opening another transaction. A
+FastStream/Dishka subscriber can receive the native `StreamMessage` in its
+constructor through the existing `FastStreamProvider` and pass
+`message.headers["event_id"]` to the injected Inbox. `run(self, event)` and module
+discovery stay unchanged. Local retry attempts retain their fresh request scopes.
+
+Inbox, business writes and `Outbox.writer(session).append(...)` can all use that
+one transaction: an input event commits its domain effect and outgoing event
+together, and duplicate inputs skip both. An HTTP side effect such as sending an
+SMS does not roll back with PostgreSQL; its receiving system still needs an
+idempotency/reconciliation contract. The retained marker protects database
+effects for its consumer/event key, not end-to-end exactly-once delivery.
+
+To observe claims, install `inbox-postgres` alongside the existing `monitoring`
+extra and replace construction with the shared provider factory:
+
+```python
+inbox = monitoring.inbox(session, received)  # A native Inbox subclass.
+```
+
+It delegates to native `claim` without changing validation or transaction
+semantics. The span `papilio_tasks.inbox.claim` records `messaging.message.id`
+and `papilio_tasks.inbox.claimed`. Metrics `papilio_tasks.inbox.claims` and
+`papilio_tasks.inbox.claim.duration` use only stable `scope` and outcome
+(`claimed`, `duplicate`, `error`, `cancelled`) labels. They describe the SQL
+claim decision, including a decision in a later rolled-back transaction, rather
+than committed business processing. Message IDs never label metrics. Providers
+and exporters remain host-owned; no payload capture or provider shutdown is added.
+Native exception diagnostics follow the host's telemetry filtering policy.
+The packaged dashboard includes claim outcomes and claim latency panels.
+
+Markers remain until the host deliberately cleans them. If retention is needed,
+schedule native `InboxCleaner` explicitly in an existing job/CLI lifecycle:
+
+```python
+from papilio_tasks.apps.inbox import InboxCleaner
+
+cleaner = InboxCleaner(
+    engine=engine, table=received, retention=inbox_retention, batch_size=1000,
+)
+result = await cleaner.cleanup()  # Native CleanupResult(cutoff, deleted_count).
+```
+
+The cleaner opens its own connections and commits batches; it does not dispose
+the borrowed engine. An error/cancellation preserves earlier committed batches
+and propagates. Native cleanup skips locked markers. No automatic cleanup task
+or retention default is installed. Choose retention to cover all possible
+redeliveries, including the DLQ replay/backfill horizon; after cleanup, an expired
+key is new again. Do not use cleanup as part of a consumer's business transaction.
 
 ### Events CLI
 

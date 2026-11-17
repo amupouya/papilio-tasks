@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.7.0 — 2026-11-17
+
+- Optional `inbox-postgres` integration using native `sqlalchemy-inbox` 0.2:
+  public Inbox, schema and explicit cleanup exports, with no parallel SQL or
+  ledger. The native consumer scope/message key shares the host transaction.
+- Optional `Monitoring.inbox(session, table)` returns a native subclass that
+  observes claim decisions, duplicates, failures/cancellation and durations;
+  event IDs remain span attributes. Claim success is distinct from host commit.
+- PostgreSQL concurrency, rollback/savepoint, database error, cancellation and
+  worker-exit acceptance checks; native FastAPI/Papilio session sharing, NATS
+  local retry/redelivery and atomic Inbox/business/Outbox handoff coverage.
+- Claim outcome/latency dashboard panels, native strict typing and framework-
+  independent installation. No automatic cleanup, schema migration, ack policy,
+  external side-effect idempotency or mandatory base dependency is introduced.
+
 ## 1.6.0 — 2026-11-17
 
 - Framework-independent `DeadLetters` management for native Outbox PostgreSQL
