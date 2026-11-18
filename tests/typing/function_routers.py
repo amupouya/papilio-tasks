@@ -2,6 +2,8 @@
 from datetime import datetime
 from typing import assert_type
 
+from dishka import FromDishka
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from taskiq import AsyncTaskiqTask
 from taskiq.scheduler.created_schedule import CreatedSchedule
@@ -18,7 +20,25 @@ class Service:
     pass
 
 
+class Cache:
+    pass
+
+
+class Payload(BaseModel):
+    value: int
+
+
 jobs = TaskRouter()
+
+
+@jobs.task(payload=Payload)
+async def marked(
+    payload: Payload,
+    *,
+    service: FromDishka[Service],
+    cache: FromDishka[Cache],
+) -> int:
+    return payload.value
 
 
 @jobs.task()
@@ -51,6 +71,40 @@ events = NatsRouter()
 created = events.publisher(int, subject="created", outbox_key="created.v1")
 
 
+async def marked_read(
+    payload: Payload, *, service: FromDishka[Service]
+) -> list[int]:
+    return [payload.value]
+
+
+async def marked_transform(
+    data: list[int], *, cache: FromDishka[Cache]
+) -> str:
+    return str(data)
+
+
+async def marked_write(data: str, *, service: FromDishka[Service]) -> int:
+    return len(data)
+
+
+native_projection = projections.projection(
+    payload=Payload,
+    read=marked_read,
+    transform=marked_transform,
+    write=marked_write,
+)
+
+
+@events.subscriber("native")
+async def marked_receive(
+    event: int,
+    *,
+    service: FromDishka[Service],
+    cache: FromDishka[Cache],
+) -> None:
+    pass
+
+
 @events.subscriber("created", dependency=Service)
 async def receive(service: Service, event: int) -> None:
     pass
@@ -74,6 +128,21 @@ async def usage(
     assert_type(await plain.at(source, now, 1), CreatedSchedule[str])
     assert_type(await plain.cron(source, "* * * * *", 1), CreatedSchedule[str])
     assert_type(await plain.every(source, 60, 1), CreatedSchedule[str])
+    message = Payload(value=1)
+    assert_type(await marked.enqueue(message), AsyncTaskiqTask[int])
+    assert_type(await marked.at(source, now, message), CreatedSchedule[int])
+    assert_type(
+        await marked.cron(source, "* * * * *", message), CreatedSchedule[int]
+    )
+    assert_type(await marked.every(source, 60, message), CreatedSchedule[int])
+    assert_type(await native_projection.enqueue(message), AsyncTaskiqTask[int])
+    await marked_receive(1, service=Service(), cache=Cache())
+    await marked.enqueue(1)  # expect-error
+    await marked.enqueue(message, Service())  # expect-error
+    await marked.enqueue(message, service=Service())  # expect-error
+    await marked.at(source, now, 1)  # expect-error
+    await native_projection.enqueue(1)  # expect-error
+    await marked_receive(1)  # expect-error
     await receive(service=Service(), event=1)
     await receive(Service(), "bad")  # expect-error
     await created.publish(1)

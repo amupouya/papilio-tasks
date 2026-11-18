@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.9.0 — 2026-11-18
+
+- Native Dishka parameter injection for function routers: multiple `FromDishka`
+  services and native component annotations use the existing request scope,
+  cache, cleanup and fresh retry-attempt scopes. Events handlers retain their
+  original directly callable function and infer the unmarked event DTO.
+- Explicit `payload=YourPayload` contracts for Taskiq function tasks and
+  projections preserve typed enqueue/time/cron/interval payloads and results
+  while excluding injected services from message signatures. Projection stages
+  can request different services using the same scope and shared pipeline.
+- Existing class APIs, plain function ParamSpec declarations and the 1.8
+  `dependency=Service` form remain supported. Providers/discovery and native
+  transports, retry, hooks, monitoring and lifecycle owners are unchanged.
+
 ## 1.8.1 — 2026-11-17
 
 - Centralize Events publisher binding and ownership in Registrar for both

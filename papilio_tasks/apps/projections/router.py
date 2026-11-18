@@ -2,7 +2,7 @@
 
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from functools import wraps
-from inspect import Parameter, iscoroutinefunction
+from inspect import iscoroutinefunction
 from typing import Any, Concatenate, overload
 
 from dishka import AsyncContainer
@@ -102,6 +102,22 @@ class ProjectionRouter:
         self.tasks: list[ProjectionTask[..., Any, Any, Any]] = []
 
     @overload
+    def projection[I, **A, T, **B, D, **C, R](
+        self,
+        *,
+        payload: type[I],
+        read: Callable[Concatenate[I, A], Awaitable[T]],
+        transform: Callable[Concatenate[T, B], Awaitable[D]],
+        write: Callable[Concatenate[D, C], Awaitable[R]],
+        name: str | None = None,
+        retry: Retry | None = None,
+        labels: Mapping[str, Any] | None = None,
+        dependency: None = None,
+        hooks: type[Hooks[T, D, R]] | None = None,
+        publish_hooks: type[PublishHooks] | None = None,
+    ) -> ProjectionTask[[I], T, D, R]: ...
+
+    @overload
     def projection[**P, T, D, R](
         self,
         *,
@@ -114,6 +130,7 @@ class ProjectionRouter:
         dependency: None = None,
         hooks: type[Hooks[T, D, R]] | None = None,
         publish_hooks: type[PublishHooks] | None = None,
+        payload: None = None,
     ) -> ProjectionTask[P, T, D, R]: ...
 
     @overload
@@ -129,6 +146,7 @@ class ProjectionRouter:
         labels: Mapping[str, Any] | None = None,
         hooks: type[Hooks[T, D, R]] | None = None,
         publish_hooks: type[PublishHooks] | None = None,
+        payload: None = None,
     ) -> ProjectionTask[P, T, D, R]: ...
 
     def projection(
@@ -143,24 +161,26 @@ class ProjectionRouter:
         dependency: type[Any] | None = None,
         hooks: type[Hooks[Any, Any, Any]] | None = None,
         publish_hooks: type[PublishHooks] | None = None,
+        payload: type[Any] | None = None,
     ) -> ProjectionTask[..., Any, Any, Any]:
+        if payload is not None and dependency is not None:
+            raise TypeError("Use FromDishka with payload=, not dependency=")
         reader, converter, writer = (
             Function(read, dependency),
             Function(transform, dependency),
             Function(write, dependency),
         )
 
-        def takes_data(stage: Function[Any]) -> bool:
-            parameters = list(stage.signature.parameters.values())
-            return len(parameters) == 1 and parameters[0].kind in (
-                Parameter.POSITIONAL_ONLY,
-                Parameter.POSITIONAL_OR_KEYWORD,
-            )
-
-        if not all(takes_data(stage) for stage in (converter, writer)):
+        if payload is not None:
+            reader.check_payload(payload)
+        elif any(
+            stage.injected is not None for stage in (reader, converter, writer)
+        ):
             raise TypeError(
-                "transform and write must each accept one data argument"
+                "FromDishka projections require payload=YourPayload"
             )
+        converter.check_payload()
+        writer.check_payload()
         task = ProjectionTask(
             reader,
             converter,

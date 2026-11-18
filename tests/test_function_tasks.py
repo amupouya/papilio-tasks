@@ -316,7 +316,7 @@ def test_duplicate_names_and_invalid_function_dependencies_are_explicit():
     async def bad(value: int, service: FromDishka[Service]):
         pass
 
-    with pytest.raises(TypeError, match="dependency="):
+    with pytest.raises(TypeError, match="payload="):
         TaskRouter().task()(bad)
     with pytest.raises(TypeError, match="First argument"):
         TaskRouter().task(dependency=Service)(one.function)

@@ -122,30 +122,61 @@ Alternatively keep a normal function and assign
 Before assembly, enqueue/scheduling raises an unregistered-definition error;
 shutdown releases the binding so a later application can assemble it again.
 
-### Explicit function dependencies
+### Native parameter dependencies
 
-For dependency injection, select one provided service class and make it the
-first positional argument. Its constructor can depend on any other provided
-services. Only the remaining arguments belong to the message:
+Version 1.9 supports Dishka's native `FromDishka` annotations directly on function
+parameters. Each handler can request several independently provided services.
+Providers remain registered through the existing `providers=` bootstrap option;
+the router uses the existing request scope and creates no second container.
+
+For Taskiq, declare one explicit payload contract. That keeps injected arguments
+out of the message and gives `enqueue`, `at`, `cron` and `every` an exact payload
+and result type:
 
 ```python
-from myapp.templates.services import Templates
+from dishka import FromDishka
+from pydantic import BaseModel
+from myapp.templates.services import Templates, TemplateCache
 
-@router.task(dependency=Templates, name="templates.refresh_with_service")
-async def refresh_with_service(
-    service: Templates, template_id: int, *, force: bool = False,
+class RefreshRequest(BaseModel):
+    template_id: int
+    force: bool = False
+
+@router.task(payload=RefreshRequest, name="templates.refresh_with_services")
+async def refresh_with_services(
+    request: RefreshRequest,
+    *,
+    templates: FromDishka[Templates],
+    cache: FromDishka[TemplateCache],
 ) -> int:
-    return await service.refresh(template_id, force=force)
+    result = await templates.refresh(request.template_id, force=request.force)
+    await cache.invalidate(request.template_id)
+    return result
 
-# The injected service is neither supplied nor serialized here.
-handle = await refresh_with_service.enqueue(12, force=True)
+handle = await refresh_with_services.enqueue(RefreshRequest(template_id=12))
 ```
 
-Supply the service's ordinary Dishka provider through `providers=`. The router
-does not infer providers, create a second container or manage a transaction.
-This explicit leading dependency lets static typing preserve the payload
-signature. Arbitrary `FromDishka` parameters in the payload are rejected.
-Every worker attempt obtains dependencies from its own existing request scope.
+In this explicit contract mode, the first argument is the annotated payload;
+all remaining handler parameters must be native injection markers. Send the
+payload positionally. Ordinary Taskiq/Pydantic conversion handles its wire value;
+no services or containers are serialized. Native Dishka components, scope caches,
+errors and cleanup remain in force. Every retry attempt uses its own existing
+request scope. Services can be shared within that scope by requesting the same
+provided type more than once. No dependency provider is inferred from the handler.
+
+A marked Taskiq handler requires `payload=YourPayload`. Runtime signature filtering
+alone cannot tell a static type checker which arbitrary `ParamSpec` arguments to
+remove; the explicit contract avoids an untyped enqueue fallback. Task functions
+without injection retain their existing multi-argument `ParamSpec` API.
+
+For local calls, `.function` is the original callable and its marked arguments
+must be supplied explicitly. The annotations are unchanged. Native injected
+parameters cannot be positional-only; keyword-only parameters work naturally.
+
+The 1.8 `dependency=Service` leading-argument form remains available for existing
+code. It cannot be mixed with `FromDishka` markers or `payload=`. New declarations
+can use parameter annotations without constructing an aggregate service merely
+to combine dependencies.
 
 ### Function projections
 
@@ -178,11 +209,38 @@ native task handle. `at`, `cron`, `every`, native `task()` and the result-preser
 `publish_hooks=` select provided hook classes; registrar/application hooks keep
 their existing order and error semantics.
 
-With `dependency=Templates`, all three stages take `service: Templates` first
-and share the same request-scoped instance. Transform and write each take one
-positional data argument after it. The three stages, shared/local hooks and
-cleanup use the existing execution scope. Write continues to own persistence
-and commit/partial-failure behavior.
+For native parameter DI, pass `payload=ReadRequest` to `router.projection(...)`.
+Read takes that payload first; transform and write each take their stage's data
+first. Each stage can then declare its own `FromDishka` parameters, including
+different services in different stages. These dependencies are resolved when
+that stage runs, using the same existing request scope/cache. Shared/local hooks
+and failure-stage reporting keep their existing behavior. For example:
+
+```python
+from dishka import FromDishka
+
+async def read(
+    request: RefreshRequest, *, templates: FromDishka[Templates],
+) -> list[int]:
+    return await templates.read_ids(request.template_id)
+
+async def transform(
+    data: list[int], *, templates: FromDishka[Templates],
+) -> str:
+    return await templates.render(data)
+
+async def write(data: str, *, cache: FromDishka[TemplateCache]) -> int:
+    return await cache.store(data)
+
+refresh = router.projection(
+    payload=RefreshRequest, read=read, transform=transform, write=write,
+)
+handle = await refresh.enqueue(RefreshRequest(template_id=12))
+```
+
+Write continues to own persistence and commit/partial-failure behavior. The
+previous `dependency=Templates` form still supplies the same leading service to
+all three stages for compatibility.
 
 ### FastStream function routes
 
@@ -252,10 +310,28 @@ await updated.publish(TemplateUpdated(id=12))
 ```
 
 The existing direct `publish(updated, select=...)` decorator accepts this route.
-Subscribers remain ordinary directly callable async functions. They can use
-`dependency=Service` with a leading service argument, the same `Retry` policy and
-provided subscribe hooks as class subscribers. Native ack policies remain in
-force; managed retry rejects `ACK_FIRST` and `MANUAL`. Events handlers retain
+Subscribers remain ordinary directly callable async functions. Native parameter
+DI needs no `payload=` option here: the single unmarked event parameter already
+declares the DTO. The original callable accepts its services explicitly during a
+local call:
+
+```python
+from dishka import FromDishka
+
+@router.subscriber(subject=UPDATED_SUBJECT, queue="template-workers")
+async def receive(
+    event: TemplateUpdated,
+    *,
+    templates: FromDishka[Templates],
+    cache: FromDishka[TemplateCache],
+) -> None:
+    await templates.updated(event.id)
+    await cache.invalidate(event.id)
+```
+
+Use this definition in place of the basic `receive` example above. The existing
+`dependency=Service` form, `Retry` policy and provided subscribe hooks remain
+supported. Native ack policies remain in force; managed retry rejects `ACK_FIRST` and `MANUAL`. Events handlers retain
 `no_reply=True` and discard return values, as class subscribers do.
 
 For transactional publication, the same route works with `OutboxWriter.append`,

@@ -15,6 +15,19 @@ class TaskRouter:
         self.tasks: list[Task[..., Any]] = []
 
     @overload
+    def task[T, **D, R](
+        self,
+        *,
+        payload: type[T],
+        name: str | None = None,
+        retry: Retry | None = None,
+        labels: Mapping[str, Any] | None = None,
+        dependency: None = None,
+    ) -> Callable[
+        [Callable[Concatenate[T, D], Awaitable[R]]], Task[[T], R]
+    ]: ...
+
+    @overload
     def task[**P, R](
         self,
         *,
@@ -22,6 +35,7 @@ class TaskRouter:
         retry: Retry | None = None,
         labels: Mapping[str, Any] | None = None,
         dependency: None = None,
+        payload: None = None,
     ) -> Callable[[Callable[P, Awaitable[R]]], Task[P, R]]: ...
 
     @overload
@@ -32,6 +46,7 @@ class TaskRouter:
         name: str | None = None,
         retry: Retry | None = None,
         labels: Mapping[str, Any] | None = None,
+        payload: None = None,
     ) -> Callable[[Callable[Concatenate[D, P], Awaitable[R]]], Task[P, R]]: ...
 
     def task(
@@ -41,12 +56,22 @@ class TaskRouter:
         retry: Retry | None = None,
         labels: Mapping[str, Any] | None = None,
         dependency: type[Any] | None = None,
+        payload: type[Any] | None = None,
     ) -> Callable[..., Task[..., Any]]:
         def decorate(
             function: Callable[..., Awaitable[Any]],
         ) -> Task[..., Any]:
+            if payload is not None and dependency is not None:
+                raise TypeError(
+                    "Use FromDishka with payload=, not dependency="
+                )
+            call = Function(function, dependency)
+            if payload is not None:
+                call.check_payload(payload)
+            elif call.injected is not None:
+                raise TypeError("FromDishka tasks require payload=YourPayload")
             task = Task(
-                Function(function, dependency),
+                call,
                 name=name,
                 retry=retry,
                 labels=labels,

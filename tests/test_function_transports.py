@@ -4,6 +4,8 @@ from contextlib import aclosing
 from uuid import uuid4
 
 import pytest
+from dishka import FromDishka
+from taskiq import TaskiqMessage
 from taskiq.receiver import Receiver
 from taskiq_nats import PullBasedJetStreamBroker
 from test_function_tasks import Payload, Service, Services
@@ -22,7 +24,8 @@ from papilio_tasks.infra.taskiq.brokers.backends.nats import JetStreamBroker
 
 
 @pytest.mark.parametrize("family", ["scheduler", "projection"])
-async def test_function_taskiq_nats_delivery_without_redis(family):
+@pytest.mark.parametrize("style", ["legacy", "markers"])
+async def test_function_taskiq_nats_delivery_without_redis(family, style):
     url = os.environ.get("TEST_NATS_URL")
     if not url:
         pytest.skip("Requires isolated NATS with JetStream")
@@ -49,14 +52,48 @@ async def test_function_taskiq_nats_delivery_without_redis(family):
         seen.append((data, service))
         return int(data)
 
+    async def native_read(
+        payload: Payload,
+        *,
+        service: FromDishka[Service],
+        message: FromDishka[TaskiqMessage],
+    ) -> int:
+        assert isinstance(message, TaskiqMessage)
+        return await read(service, payload)
+
+    async def native_transform(
+        data: int, *, service: FromDishka[Service]
+    ) -> str:
+        return await transform(service, data)
+
+    async def native_write(data: str, *, service: FromDishka[Service]) -> int:
+        return await write(service, data)
+
     if family == "scheduler":
         router = TaskRouter()
 
-        @router.task(dependency=Service)
-        async def task(service: Service, payload: Payload) -> int:
-            value = await read(service, payload)
-            seen.append((str(value), service))
-            return value
+        if style == "markers":
+
+            @router.task(payload=Payload)
+            async def task(
+                payload: Payload,
+                *,
+                service: FromDishka[Service],
+                message: FromDishka[TaskiqMessage],
+            ) -> int:
+                value = await native_read(
+                    payload, service=service, message=message
+                )
+                seen.append((str(value), service))
+                return value
+
+        else:
+
+            @router.task(dependency=Service)
+            async def task(service: Service, payload: Payload) -> int:
+                value = await read(service, payload)
+                seen.append((str(value), service))
+                return value
 
         broker = create_broker(
             registrar=NatsRegistrar(transport),
@@ -65,9 +102,17 @@ async def test_function_taskiq_nats_delivery_without_redis(family):
         )
     else:
         router = ProjectionRouter()
-        task = router.projection(
-            read=read, transform=transform, write=write, dependency=Service
-        )
+        if style == "markers":
+            task = router.projection(
+                payload=Payload,
+                read=native_read,
+                transform=native_transform,
+                write=native_write,
+            )
+        else:
+            task = router.projection(
+                read=read, transform=transform, write=write, dependency=Service
+            )
         broker = projects(
             registrar=Projects(transport),
             routers=[router],
@@ -98,8 +143,10 @@ async def test_function_taskiq_nats_delivery_without_redis(family):
             await broker.shutdown()
 
 
-async def test_function_jetstream_native_prefix_local_retry_and_headers():
+@pytest.mark.parametrize("style", ["legacy", "markers"])
+async def test_function_jetstream_native_prefix_local_retry_and_headers(style):
     # Keep Taskiq transport checks independent of the optional Events family.
+    from faststream import StreamMessage
     from faststream.nats import JStream, PullSub
     from faststream.nats import NatsBroker as NativeNats
     from test_function_events import Service as EventService
@@ -125,21 +172,45 @@ async def test_function_jetstream_native_prefix_local_retry_and_headers():
     router = NatsRouter(prefix=name + ".")
     created = router.publisher(Payload, subject="created", stream=stream)
 
-    @router.subscriber(
-        "created",
-        stream=stream,
-        durable=name,
-        pull_sub=PullSub(),
-        dependency=EventService,
-        retry=Retry(attempts=2, delay=0, errors=(ConnectionError,)),
-    )
-    async def receive(service: EventService, event: Payload) -> None:
-        assert isinstance(event, Payload)
-        assert service.message.headers["event_id"] == "stable"
-        calls.append(service)
-        if len(calls) == 1:
-            raise ConnectionError("transient")
-        done.set()
+    if style == "markers":
+
+        @router.subscriber(
+            "created",
+            stream=stream,
+            durable=name,
+            pull_sub=PullSub(),
+            retry=Retry(attempts=2, delay=0, errors=(ConnectionError,)),
+        )
+        async def receive(
+            event: Payload,
+            *,
+            service: FromDishka[EventService],
+            message: FromDishka[StreamMessage],
+        ) -> None:
+            assert message is service.message
+            assert message.headers["event_id"] == "stable"
+            calls.append(service)
+            if len(calls) == 1:
+                raise ConnectionError("transient")
+            done.set()
+
+    else:
+
+        @router.subscriber(
+            "created",
+            stream=stream,
+            durable=name,
+            pull_sub=PullSub(),
+            dependency=EventService,
+            retry=Retry(attempts=2, delay=0, errors=(ConnectionError,)),
+        )
+        async def receive(service: EventService, event: Payload) -> None:
+            assert isinstance(event, Payload)
+            assert service.message.headers["event_id"] == "stable"
+            calls.append(service)
+            if len(calls) == 1:
+                raise ConnectionError("transient")
+            done.set()
 
     app = create_app(
         registrar=JetRegistrar(NatsBroker(native)),

@@ -4,7 +4,7 @@ from importlib import import_module
 from textwrap import dedent
 
 import pytest
-from dishka import Provider, Scope, provide
+from dishka import FromDishka, Provider, Scope, provide
 from faststream import AckPolicy, StreamMessage
 from faststream.nats import NatsBroker as NativeNats
 from faststream.nats import TestNatsBroker
@@ -233,7 +233,10 @@ async def test_discovery_capabilities_and_shared_router(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("transport", ["nats", "rabbit", "kafka", "redis"])
-async def test_function_routes_compile_with_native_transports(transport):
+@pytest.mark.parametrize("style", ["plain", "markers"])
+async def test_function_routes_compile_with_native_transports(
+    transport, style
+):
     native = import_module("faststream." + transport)
     module = import_module("papilio_tasks.apps.events.routers." + transport)
     title = transport.capitalize()
@@ -270,6 +273,15 @@ async def test_function_routes_compile_with_native_transports(transport):
     async def receive(event: Event) -> None:
         seen.append(event.value)
 
+    services = Services()
+    if style == "markers":
+
+        async def receive(
+            event: Event, *, service: FromDishka[Service]
+        ) -> None:
+            assert not service.closed
+            seen.append(event.value)
+
     if transport == "kafka":
         router.subscriber("created", group_id="worker")(receive)
     else:
@@ -286,18 +298,23 @@ async def test_function_routes_compile_with_native_transports(transport):
     )
     broker = getattr(native, title + "Broker")(logger=None)
     reg = registrar_type(wrapped_type(broker))
-    app = create_app(registrar=reg, routers=[router])
+    app = create_app(registrar=reg, routers=[router], providers=[services])
     tester = getattr(native, "Test" + title + "Broker")
     try:
         async with tester(broker):
             await created.publish(Event(value=9))
         assert seen == [9]
+        if style == "markers":
+            assert (
+                len(services.instances) == 1 and services.instances[0].closed
+            )
     finally:
         await app.stop()
 
 
 @pytest.mark.parametrize("route", ["list", "channel", "jetstream"])
-async def test_native_redis_modes_and_jetstream_function_routes(route):
+@pytest.mark.parametrize("style", ["plain", "markers"])
+async def test_native_redis_modes_and_jetstream_function_routes(route, style):
     seen = []
     if route == "jetstream":
         from faststream.nats import JStream, PullSub
@@ -333,15 +350,28 @@ async def test_native_redis_modes_and_jetstream_function_routes(route):
         tester = TestRedisBroker
     created = router.publisher(Event, **options)
 
-    @router.subscriber(**subscriber)
     async def receive(event: Event) -> None:
         seen.append(event.value)
 
-    app = create_app(registrar=reg, routers=[router])
+    services = Services()
+    if style == "markers":
+
+        async def receive(
+            event: Event, *, service: FromDishka[Service]
+        ) -> None:
+            assert not service.closed
+            seen.append(event.value)
+
+    router.subscriber(**subscriber)(receive)
+    app = create_app(registrar=reg, routers=[router], providers=[services])
     try:
         async with tester(reg.broker.native):
             await created.publish(Event(value=1))
         assert seen == [1]
+        if style == "markers":
+            assert (
+                len(services.instances) == 1 and services.instances[0].closed
+            )
     finally:
         await app.stop()
 
