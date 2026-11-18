@@ -4,7 +4,14 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 import pytest
-from dishka import FromComponent, FromDishka, Provider, Scope, provide
+from dishka import (
+    FromComponent,
+    FromDishka,
+    Provider,
+    Scope,
+    make_async_container,
+    provide,
+)
 from dishka.exceptions import NoFactoryError
 from faststream.nats import NatsBroker as NativeNats
 from faststream.nats import TestNatsBroker
@@ -21,6 +28,7 @@ from papilio_tasks.apps.projections.router import ProjectionRouter
 from papilio_tasks.apps.schedulers import TaskRouter
 from papilio_tasks.apps.schedulers.application import create_broker
 from papilio_tasks.apps.schedulers.registry import Registrar
+from papilio_tasks.infra.dishka import Function
 from papilio_tasks.infra.faststream.brokers.backends.nats import NatsBroker
 from papilio_tasks.infra.taskiq.retry_runtime import RetryRuntime
 from papilio_tasks.infra.taskiq.sources.backends.memory import MemorySource
@@ -332,3 +340,43 @@ def test_payload_contract_and_dependency_errors_are_explicit():
 
     with pytest.raises(TypeError, match="not both"):
         TaskRouter().task(dependency=Store)(mixed)
+
+
+@pytest.mark.parametrize("placement", ["first", "before"])
+async def test_bound_native_payload_arguments_retain_python_validation(
+    placement,
+):
+    calls, resources = [], Resources()
+    if placement == "first":
+
+        async def handler(data: Input, *, store: FromDishka[Store]) -> int:
+            assert not store.closed
+            calls.append(data.value)
+            return data.value
+
+    else:
+
+        async def handler(store: FromDishka[Store], data: Input) -> int:
+            assert not store.closed
+            calls.append(data.value)
+            return data.value
+
+    call = Function(handler)
+    container = make_async_container(resources)
+    try:
+        async with container() as scope:
+            bound = await call.bind(scope)
+            assert await bound(Input(value=1)) == 1
+            assert await bound(data=Input(value=2)) == 2
+            with pytest.raises(TypeError):
+                await bound()
+            with pytest.raises(TypeError):
+                await bound(Input(value=3), Input(value=4))
+            with pytest.raises(TypeError):
+                await bound(Input(value=3), data=Input(value=4))
+            with pytest.raises(TypeError):
+                await bound(unknown=Input(value=5))
+            assert calls == [1, 2]
+        assert len(resources.instances) == 1 and resources.instances[0].closed
+    finally:
+        await container.close()

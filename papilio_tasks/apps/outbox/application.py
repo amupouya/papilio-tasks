@@ -1,10 +1,9 @@
 """Compose modular event routes over a caller-configured OutboxBroker."""
 
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Sequence
 from typing import Any
 
-from faststream import AckPolicy, FastStream
+from faststream import AckPolicy
 from faststream_outbox import OutboxBroker
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
@@ -13,57 +12,14 @@ from papilio_tasks.apps.events.publishers.base import (
     Publisher,
     PublisherRoute,
 )
-from papilio_tasks.apps.events.publishers.bindings import get as get_sender
 from papilio_tasks.apps.events.routers.base import Router
 from papilio_tasks.apps.lifecycle import Producer, Producers
 from papilio_tasks.infra.faststream.outbox import PolicyRetry, forward
 from papilio_tasks.tools.bootstrap import Bootstrapper
 from papilio_tasks.tools.retry import Retry
 
+from .relay import RelayApplication as RelayApplication
 from .writer import OutboxWriter
-
-
-class RelayApplication(FastStream):
-    """Native CLI application owning its declared producer lifetimes."""
-
-    def __init__(
-        self,
-        broker: OutboxBroker,
-        producers: Sequence[Producer],
-        publishers: Sequence[Publication[Any]],
-    ) -> None:
-        self.producers = Producers(*producers)
-        self.publishers = tuple(publishers)
-        self._closed = False
-        super().__init__(broker, lifespan=self._lifespan)
-
-    @asynccontextmanager
-    async def _lifespan(self) -> AsyncIterator[None]:
-        try:
-            yield
-        finally:
-            await self.stop()
-
-    async def start(self, **options: Any) -> None:
-        if self._closed:
-            raise RuntimeError("Outbox relay is closed")
-        try:
-            await self.producers.connect()
-            for publisher in self.publishers:
-                get_sender(publisher)
-            await super().start(**options)
-        except BaseException:
-            await self.stop()
-            raise
-
-    async def stop(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            await super().stop()
-        finally:
-            await self.producers.stop()
 
 
 class Outbox:

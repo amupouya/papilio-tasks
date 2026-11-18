@@ -1355,10 +1355,20 @@ The package has three main responsibility groups:
 - `tools/`: discovery, retry settings and hook execution/payloads.
 
 Applications depend on tools and infrastructure; infrastructure may use independent
-policy types from tools. Tools do not import apps, infrastructure or optional
-runtimes. Both `apps` and `tools` have lightweight package initializers.
+policy types from tools. Core discovery, retry settings and hooks use only the
+standard library. The optional `tools.monitoring` facade loads selected native
+adapters lazily. Both `apps` and `tools` have lightweight package initializers.
 `cli/` remains the command entry point. `tools/retry.py` holds configuration;
 `infra/taskiq/retry.py` adapts it to Taskiq.
+
+Native callable injection lives in `infra/dishka.py`. Shared Taskiq container
+cleanup and beat construction live in `infra/taskiq/application.py`;
+`retry_runtime.py` owns retry configuration/source lifetime and `retry_beat.py`
+owns native retry dispatch. Direct dead-letter SQL and its observations live
+under `infra/sqlalchemy/`. Outbox route assembly stays in
+`apps/outbox/application.py`, while `relay.py` owns its producer lifecycle.
+Previous function-adapter, dead-letter, monitoring and application import paths
+remain available as compatibility exports.
 
 ## Local projections
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.9.1 — 2026-11-18
+
+- Move native Dishka callable adaptation, SQL dead-letter management and SQL
+  observations to their integration owners. Existing import paths remain valid.
+- Share Taskiq container cleanup and beat construction across schedulers and
+  projections; separate retry beat dispatch and Outbox relay lifecycle from
+  configuration/route assembly without changing native delivery semantics.
+- Bind payload-first injected handlers directly with `functools.partial`,
+  avoiding repeated general argument binding. Preserve preceding-dependency
+  Events handlers, native request scopes, typed payloads and legacy declarations.
+
 ## 1.9.0 — 2026-11-18
 
 - Native Dishka parameter injection for function routers: multiple `FromDishka`

@@ -14,7 +14,7 @@ from taskiq.decor import AsyncTaskiqDecoratedTask
 from taskiq.scheduler.created_schedule import CreatedSchedule
 from taskiq.scheduler.scheduled_task import CronSpec
 
-from papilio_tasks.tools.functions import Function
+from papilio_tasks.infra.dishka import Function
 from papilio_tasks.tools.hooks.publish import PublishHooks
 from papilio_tasks.tools.retry import Retry
 

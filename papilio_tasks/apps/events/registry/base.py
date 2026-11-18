@@ -9,10 +9,10 @@ from dishka import AsyncContainer
 from dishka_faststream import FromDishka, inject
 from faststream import AckPolicy, ContextRepo, StreamMessage
 
+from papilio_tasks.infra.dishka import Function
 from papilio_tasks.infra.faststream.brokers.contracts.base import (
     BrokerContract,
 )
-from papilio_tasks.tools.functions import Function
 from papilio_tasks.tools.hooks.publish import PublishHooks
 from papilio_tasks.tools.hooks.subscribe import (
     SubscribeCall,

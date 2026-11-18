@@ -8,8 +8,8 @@ from typing import Any, Concatenate, overload
 from dishka import AsyncContainer
 from taskiq import AsyncTaskiqTask
 
+from papilio_tasks.infra.dishka import Function
 from papilio_tasks.infra.taskiq.functions import Task
-from papilio_tasks.tools.functions import Function
 from papilio_tasks.tools.hooks.projection import Hooks
 from papilio_tasks.tools.hooks.publish import PublishHooks
 from papilio_tasks.tools.retry import Retry

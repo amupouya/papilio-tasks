@@ -4,6 +4,8 @@ from functools import wraps
 from inspect import Parameter, isabstract, iscoroutinefunction, signature
 from typing import Any, get_type_hints
 
+from dishka import FromDishka
+from dishka.integrations.taskiq import inject
 from taskiq.decor import AsyncTaskiqDecoratedTask
 
 from papilio_tasks.infra.taskiq import bindings
@@ -51,9 +53,6 @@ class Registrar[S: Scheduler]:
     def _prepare(
         self, cls: type[S], name: str | None
     ) -> tuple[Callable[..., Awaitable[Any]], str]:
-        from dishka import FromDishka
-        from dishka.integrations.taskiq import inject
-
         if not isinstance(cls, type) or not issubclass(cls, Scheduler):
             raise TypeError("Include a Scheduler class")
         if cls._backend != self._backend:

@@ -3,19 +3,21 @@
 from collections.abc import Sequence
 
 from dishka import Provider, make_async_container
-from dishka.integrations.taskiq import TaskiqProvider, setup_dishka
-from taskiq import AsyncBroker, TaskiqEvents, TaskiqScheduler, TaskiqState
+from dishka.integrations.taskiq import TaskiqProvider
+from taskiq import AsyncBroker
 
 from papilio_tasks.infra.taskiq import bindings
+from papilio_tasks.infra.taskiq.application import (
+    create_beat as create_beat,
+)
+from papilio_tasks.infra.taskiq.application import setup_container
 from papilio_tasks.infra.taskiq.retry_runtime import (
     RetryRuntime,
     install_retry,
     prepare_retry,
-    release_retry,
 )
 from papilio_tasks.infra.taskiq.sources.contracts.base import (
     MutableSourceContract,
-    SourceContract,
 )
 from papilio_tasks.tools.bootstrap import Bootstrapper
 from papilio_tasks.tools.hooks.publish import PublishHooks
@@ -83,22 +85,9 @@ def create_broker(
         for task in tasks:
             task.include(registry.broker)
         container = make_async_container(TaskiqProvider(), *providers)
-        setup_dishka(container, broker)
-        broker.state.papilio_container = container
+        setup_container(broker, container)
         broker.state.papilio_publish_hooks = publish_hooks
         broker.state.papilio_projection_hooks = registry.hooks
-
-        @broker.on_event(
-            TaskiqEvents.CLIENT_SHUTDOWN, TaskiqEvents.WORKER_SHUTDOWN
-        )
-        async def close_container(state: TaskiqState) -> None:
-            try:
-                await container.close()
-            finally:
-                try:
-                    await release_retry(broker)
-                finally:
-                    bindings.release(broker)
 
         install_retry(broker, runtime)
     except Exception:
@@ -106,21 +95,3 @@ def create_broker(
         raise
 
     return broker
-
-
-def create_beat(
-    broker: AsyncBroker, *, sources: Sequence[SourceContract]
-) -> TaskiqScheduler:
-    """Build native beat with caller-selected sources; open no resources.
-
-    Include the broker's retry_source explicitly. In a separate beat process,
-    construct a source pointing at the same shared store, then assemble there.
-    """
-    native_sources = [source.native for source in sources]
-    if "papilio_retry_source" in broker.state:
-        retry_source = broker.state.papilio_retry_source
-        if retry_source is not None and not any(
-            source is retry_source.native for source in native_sources
-        ):
-            raise ValueError("Beat sources must include the retry_source")
-    return TaskiqScheduler(broker, sources=native_sources)

@@ -6,7 +6,7 @@ from typing import Any, ClassVar, cast
 
 from faststream import AckPolicy
 
-from papilio_tasks.tools.functions import Function
+from papilio_tasks.infra.dishka import Function
 from papilio_tasks.tools.retry import Retry
 
 from ..publishers.base import PublisherRoute
