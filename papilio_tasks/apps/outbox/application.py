@@ -52,6 +52,11 @@ class Outbox:
         for cls in Bootstrapper(modules).classes("publishers", Publisher):
             if cls.outbox_key is not None:
                 self.include(cls)
+        for route in Bootstrapper(modules).instances(
+            "publishers", PublisherRoute
+        ):
+            if route.broker_type is not None and route.outbox_key is not None:
+                self.include(route)
         selected = dict.fromkeys(
             [
                 *Bootstrapper(modules).routers("publishers", Router),

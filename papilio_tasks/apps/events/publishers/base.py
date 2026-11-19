@@ -1,9 +1,15 @@
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from copy import deepcopy
 from functools import wraps
 from inspect import iscoroutinefunction
-from typing import Any, ClassVar
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from .bindings import get
+from .contracts import Sender
+
+if TYPE_CHECKING:
+    from ..registry.base import Registrar
 
 
 class Publisher[T]:
@@ -17,7 +23,7 @@ class Publisher[T]:
 
 
 class PublisherRoute[T]:
-    """A typed function-router route with the same publication contract."""
+    """A typed publication; the application owns its native sender."""
 
     def __init__(
         self,
@@ -25,9 +31,15 @@ class PublisherRoute[T]:
         *,
         name: str | None = None,
         outbox_key: str | None = None,
+        broker_type: type[Any] | None = None,
+        options: Mapping[str, Any] | None = None,
+        unpack: bool = False,
     ) -> None:
         self.event_type = event_type
         self.outbox_key = outbox_key
+        self.broker_type = broker_type
+        self.options = MappingProxyType(dict(options or {}))
+        self._unpack = unpack
         self.__module__ = event_type.__module__
         self.__qualname__ = (
             name if name is not None else outbox_key or event_type.__qualname__
@@ -37,6 +49,39 @@ class PublisherRoute[T]:
 
     async def publish(self, event: T, **options: Any) -> Any:
         return await get(self)(event, **options)
+
+    def include(self, registrar: "Registrar", **options: Any) -> None:
+        """Bind once at bootstrap, with explicit native option overrides.
+
+        No connection is opened. Existing app ownership, hooks and shutdown
+        apply. Subscriber references use this app's effective options.
+        """
+        if self.broker_type is None:
+            raise ValueError(
+                "Include a legacy router publisher through its router"
+            )
+        if not isinstance(registrar.broker.native, self.broker_type):
+            raise ValueError(
+                "Publisher and broker must use the same transport"
+            )
+        selected = deepcopy(dict(self.options))
+        selected.update(options)
+
+        def create() -> Sender:
+            sender = (
+                cast(Any, registrar.broker.native)
+                .publisher(**selected)
+                .publish
+            )
+            if not self._unpack:
+                return sender
+
+            async def batch(events: Any, **kwargs: Any) -> Any:
+                return await sender(*events, **kwargs)
+
+            return batch
+
+        registrar.bind_publisher(self, create, selected)
 
 
 type Publication[T] = type[Publisher[T]] | PublisherRoute[T]

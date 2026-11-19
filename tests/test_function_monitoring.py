@@ -5,6 +5,7 @@ from faststream.nats.opentelemetry import NatsTelemetryMiddleware
 from monitoring_support import observations as observations
 
 from papilio_tasks.apps.events.application import create_app
+from papilio_tasks.apps.events.publishers.nats import publisher
 from papilio_tasks.apps.events.registry.nats import NatsRegistrar
 from papilio_tasks.apps.events.routers.nats import NatsRouter
 from papilio_tasks.apps.projections.application import (
@@ -60,9 +61,14 @@ async def test_function_task_native_monitoring_and_trace_parent(
     assert observations.points("task_success")[0].value == 1
 
 
-async def test_function_event_retry_uses_existing_monitoring(observations):
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_function_event_retry_uses_existing_monitoring(
+    observations, standalone
+):
     router, calls = NatsRouter(), []
-    created = router.publisher(int, subject="created")
+    created = (publisher if standalone else router.publisher)(
+        int, subject="created"
+    )
 
     @router.subscriber(
         "created",
@@ -77,7 +83,9 @@ async def test_function_event_retry_uses_existing_monitoring(observations):
     native = NativeNats(logger=None)
     observations.monitoring.faststream(native, NatsTelemetryMiddleware)
     app = create_app(
-        registrar=NatsRegistrar(NatsBroker(native)), routers=[router]
+        registrar=NatsRegistrar(NatsBroker(native)),
+        routers=[router],
+        publishers=[created] if standalone else [],
     )
     try:
         async with TestNatsBroker(native):

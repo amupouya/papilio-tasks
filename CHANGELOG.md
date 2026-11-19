@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.10.0 — 2026-11-19
+
+- Require FastStream 0.7.8 for Events, including its corrected bound Redis List
+  batch publisher API. No new runtime dependency family is added.
+- Add independent typed `publisher()` declarations for RabbitMQ, Kafka,
+  NATS/JetStream and Redis Streams, Pub/Sub and Lists. Existing class publishers
+  and `router.publisher()` declarations remain supported.
+- Discover standalone publications in existing publisher roots, including
+  Outbox discovery; accept explicit typed publications in Events `publishers=`.
+- Add optional `publisher=` defaults to function subscribers, preserving native
+  consumer settings, explicit patterns/topics/bindings and final addresses under
+  router prefixes. Consumer-only registration does not bind a producer.
+- Expose shared native router settings explicitly. Bootstrap publication overrides
+  use the existing binding owner; references in that application see its effective
+  options. Connection configuration, retention, retry and DI ownership stay native.
+
 ## 1.9.1 — 2026-11-18
 
 - Move native Dishka callable adaptation, SQL dead-letter management and SQL

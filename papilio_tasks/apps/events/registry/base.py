@@ -38,7 +38,7 @@ class Registrar(ABC):
         self.container: AsyncContainer | None = None
         self.publish_hooks: type[PublishHooks] | None = None
         self.subscribe_hooks: type[SubscribeHooks] | None = None
-        self._publishers: set[Publication[Any]] = set()
+        self._publishers: dict[Publication[Any], Mapping[str, object]] = {}
         self._handler_names: set[str] = set()
         self._subscribers: set[type[Subscriber[Any]]] = set()
 
@@ -52,6 +52,12 @@ class Registrar(ABC):
 
     def has_publisher(self, cls: Publication[Any]) -> bool:
         return cls in self._publishers
+
+    def publisher_options(
+        self, cls: Publication[Any]
+    ) -> Mapping[str, object] | None:
+        """Return effective startup options for a registered publication."""
+        return self._publishers.get(cls)
 
     def has_subscriber(self, cls: type[Subscriber[Any]]) -> bool:
         return cls in self._subscribers
@@ -104,7 +110,7 @@ class Registrar(ABC):
         self.check_publisher(publication)
         native = create()
         bindings.add(publication, self, self.sender(publication, native, meta))
-        self._publishers.add(publication)
+        self._publishers[publication] = MappingProxyType(dict(meta))
 
     def check_publisher(self, publication: Publication[Any]) -> None:
         """Reject closed or already-bound declarations before preparation."""

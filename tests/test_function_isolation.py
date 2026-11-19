@@ -41,14 +41,16 @@ else:
     from faststream.nats import NatsBroker as NativeNats
     from papilio_tasks.infra.faststream.brokers.backends.nats import NatsBroker
     from papilio_tasks.apps.events.routers.nats import NatsRouter
+    from papilio_tasks.apps.events.publishers.nats import publisher
     from papilio_tasks.apps.events.registry.nats import NatsRegistrar
     from papilio_tasks.apps.events.application import create_app
     router = NatsRouter()
     route = router.publisher(int, subject='created')
+    independent = publisher(int, subject='independent')
     @router.subscriber('created')
     async def handler(event: int) -> None: pass
     reg = NatsRegistrar(NatsBroker(NativeNats(logger=None)))
-    app = create_app(registrar=reg, routers=[router])
+    app = create_app(registrar=reg, routers=[router], publishers=[independent])
 """
     result = subprocess.run(
         [sys.executable, "-c", code, family],

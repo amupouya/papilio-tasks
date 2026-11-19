@@ -11,7 +11,7 @@ from papilio_tasks.tools.bootstrap import Bootstrapper
 from papilio_tasks.tools.hooks.publish import PublishHooks
 from papilio_tasks.tools.hooks.subscribe import SubscribeHooks
 
-from .publishers.base import Publisher
+from .publishers.base import Publication, Publisher, PublisherRoute
 from .registry.base import Registrar
 from .routers.base import Router
 from .subscribers.base import Subscriber
@@ -78,7 +78,7 @@ def create_app(
     *,
     registrar: Registrar,
     providers: Sequence[Provider] = (),
-    publishers: Sequence[str] = (),
+    publishers: Sequence[str | Publication[Any]] = (),
     subscribers: Sequence[str] = (),
     routers: Sequence[Router] = (),
     producers: Sequence[Producer] = (),
@@ -108,14 +108,27 @@ def create_app(
                 raise TypeError(
                     f"{name} must be a {base.__name__} class or None"
                 )
-        senders = Bootstrapper(publishers).classes("publishers", Publisher)
+        roots = [item for item in publishers if isinstance(item, str)]
+        senders = Bootstrapper(roots).classes("publishers", Publisher)
+        declarations = Bootstrapper(roots).instances(
+            "publishers", PublisherRoute
+        )
+        for item in publishers:
+            if isinstance(item, PublisherRoute):
+                declarations.append(item)
+            elif isinstance(item, type) and issubclass(item, Publisher):
+                senders.append(item)
+            elif not isinstance(item, str):
+                raise TypeError(
+                    "publishers must contain roots or typed publications"
+                )
         receivers = Bootstrapper(subscribers).classes(
             "subscribers", Subscriber
         )
         # Merge capabilities before inclusion. A shared/re-exported router is
         # compiled once; producer-only roots must never install consumers.
         plans: dict[Router, tuple[bool, bool]] = {}
-        for router in Bootstrapper(publishers).routers("publishers", Router):
+        for router in Bootstrapper(roots).routers("publishers", Router):
             plans[router] = (True, False)
         for router in Bootstrapper(subscribers).routers("subscribers", Router):
             plans[router] = (plans.get(router, (False, False))[0], True)
@@ -124,6 +137,12 @@ def create_app(
         for cls in senders:
             if not registrar.has_publisher(cls):
                 registrar.publisher(cls)
+        for publication in dict.fromkeys(declarations):
+            if (
+                publication.broker_type is not None
+                and not registrar.has_publisher(publication)
+            ):
+                publication.include(registrar)
         for cls in receivers:
             if not registrar.has_subscriber(cls):
                 registrar.subscriber(cls)

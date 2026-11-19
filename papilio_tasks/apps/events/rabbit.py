@@ -1,6 +1,7 @@
 """Configured RabbitMQ event applications."""
 
 from collections.abc import Sequence
+from typing import Any
 
 from dishka import Provider
 from faststream.rabbit import RabbitBroker as NativeRabbitBroker
@@ -12,6 +13,7 @@ from papilio_tasks.tools.hooks.subscribe import SubscribeHooks
 
 from .application import Application
 from .application import create_app as assemble
+from .publishers.base import Publication
 from .registry.rabbit import RabbitRegistrar
 from .routers.base import Router
 
@@ -20,7 +22,7 @@ def create_app(
     url: str,
     *,
     providers: Sequence[Provider] = (),
-    publishers: Sequence[str] = (),
+    publishers: Sequence[str | Publication[Any]] = (),
     subscribers: Sequence[str] = (),
     routers: Sequence[Router] = (),
     producers: Sequence[Producer] = (),

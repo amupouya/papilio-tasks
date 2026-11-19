@@ -65,6 +65,10 @@ class Bootstrapper:
         imported; missing business dependencies retain their original errors.
         The family type is supplied by the caller to isolate optional backends.
         """
+        return self.instances(name, base)
+
+    def instances[T](self, name: str, base: type[T]) -> list[T]:
+        """Find declared objects once by identity in the selected family."""
         found: list[T] = []
         seen: set[int] = set()
         for module in self.modules(name):

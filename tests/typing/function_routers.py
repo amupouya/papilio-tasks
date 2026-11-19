@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from taskiq import AsyncTaskiqTask
 from taskiq.scheduler.created_schedule import CreatedSchedule
 
+from papilio_tasks.apps.events.publishers.base import PublisherRoute
+from papilio_tasks.apps.events.publishers.nats import publisher
 from papilio_tasks.apps.events.routers.nats import NatsRouter
 from papilio_tasks.apps.outbox import Outbox, OutboxWriter
 from papilio_tasks.apps.outbox.decorators import publish as outbox_publish
@@ -69,6 +71,14 @@ projected = projections.projection(
 )
 events = NatsRouter()
 created = events.publisher(int, subject="created", outbox_key="created.v1")
+independent = publisher(Payload, subject="independent")
+assert_type(independent, PublisherRoute[Payload])
+
+
+async def independent_publication_types() -> None:
+    await independent.publish(Payload(value=1))
+    await independent.publish("wrong")  # expect-error
+    publisher(Payload, subject=123)  # expect-error
 
 
 async def marked_read(

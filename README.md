@@ -68,6 +68,123 @@ styles use the same native brokers, Dishka request scopes, retry policies and
 monitoring. Existing class declarations and their names remain valid. Routers
 collect definitions without opening connections or constructing services.
 
+### Independent Events publishers and subscriber routers
+
+Version 1.10 lets a module declare a typed sender independently of its subscriber
+router. Existing class and `router.publisher()` declarations remain supported.
+Events requires FastStream 0.7.8 or later within 0.7; older bound Redis List batch
+publishers incorrectly require the destination again at send time.
+
+```python
+# myapp/orders/infra/broker/publishers.py
+from faststream.nats import JStream
+from papilio_tasks.apps.events.publishers.jetstream import publisher
+from myapp.orders.domain.events import OrderCreated
+
+created = publisher(
+    OrderCreated,
+    subject="orders.created",
+    stream=JStream("orders", subjects=["orders.created"]),
+    outbox_key="orders.created.v1",
+)
+```
+
+```python
+# myapp/orders/tasks/subscribers.py
+from dishka import FromDishka
+from papilio_tasks.apps.events.routers.nats import NatsRouter
+from myapp.orders.domain.events import OrderCreated
+from myapp.orders.infra.broker.publishers import created
+from myapp.orders.app.interfaces import Orders
+
+router = NatsRouter(include_in_schema=True)
+
+@router.subscriber(publisher=created, durable="orders_worker", pull_sub=True)
+async def consume(event: OrderCreated, *, orders: FromDishka[Orders]) -> None:
+    await orders.handle(event.id)
+```
+
+`publisher=` supplies destination defaults only; it does not register a sender,
+resolve dependencies or choose consumer identities. An explicit subscription can
+instead provide native subjects/wildcards, multiple Kafka topics or Rabbit queue
+bindings. Handler annotations still describe the actual received payload, including
+native batch consumption. Register services with the existing Dishka providers.
+
+Discover declarations through the existing selected roots:
+
+```python
+app = create_app(
+    registrar=registrar,
+    publishers=["myapp.orders"],
+    subscribers=["myapp.orders"],
+    providers=providers,
+)
+```
+
+Alternatively `publishers=[created]` registers an explicit handle (or Publisher
+class). Repeated handles and discovery/manual overlaps bind once. Producer-only
+roots never load `subscribers.py`; subscriber-only roots do not bind referenced
+publishers for sending. Outbox discovers standalone publications with a stable
+`outbox_key` through the same module roots. Direct `created.publish(event)`, the
+ordinary publish decorator and Outbox append/batch/decorators keep their existing
+transaction and lifecycle semantics.
+
+Every backend retains its native configuration:
+
+| Publisher factory module | Publication | Subscription |
+| --- | --- | --- |
+| `events.publishers.rabbit` | exchange/routing key or default-exchange queue | explicit RabbitQueue/binding, channel and ack |
+| `events.publishers.kafka` | topic, key, partition and native batch | topics/pattern/partitions, group, offsets and fetch |
+| `events.publishers.nats` | Core NATS subject; optional JetStream stream | subject/pattern and queue group |
+| `events.publishers.jetstream` | subject and required stream | durable, pull/push and ConsumerConfig |
+| `events.publishers.streams` | stream name or native StreamSub (including maxlen) | StreamSub group, consumer, cursor and pending recovery |
+| `events.publishers.channels` | channel name or native PubSub | channel/pattern |
+| `events.publishers.lists` | list name or native ListSub | ListSub polling/batch |
+
+Import factories under `papilio_tasks.apps`. Extra native publication options pass
+through unchanged. Select an event type matching the native publication payload;
+for Kafka batch publication, for example, `publisher(list[OrderCreated],
+topic="orders", batch=True)` publishes a list. Core NATS/PubSub do not provide
+offline delivery; Redis Lists do not gain Streams crash recovery. Redis stream
+acknowledgement does not delete entries: select retention explicitly, accounting
+for other consumer groups. JetStream WorkQueue retention disallows overlapping
+independent consumers. Broker confirmations are not consumer completion.
+
+Router constructor settings are explicit: `prefix`, `middlewares`, `dependencies`,
+`parser`, `decoder`, `include_in_schema` and `ack_policy`. These are the native
+FastStream grouping options, not a new DI or settings system. Subscription options
+override applicable router defaults; `retry=` remains an explicit handler policy,
+with the existing incompatible-ack startup checks. Consumer-specific queue names,
+durables/groups, channels and native resource declarations stay with subscriptions.
+
+`prefix` changes real native addresses. A reference contains a complete publication
+address: the router removes its matching prefix before native registration so it
+is applied once. An inferred address outside the router prefix fails assembly;
+use an unprefixed router or an explicit native subscription. Explicit native
+destinations follow FastStream prefix semantics normally. Shared mutable native
+queue/stream declarations must not be mutated by application assembly.
+
+The host owns configuration files and validation. Pass connection/security,
+Kafka producer acks/idempotence/buffering and Rabbit channel/prefetch settings to
+the native broker/channel in bootstrap. Definitions may share module-owned native
+resource objects under infrastructure; a separate configuration file is optional.
+Do not model Rabbit queues, Kafka groups and JetStream consumers as one queue type.
+
+For an explicit publication override during bootstrap, before `create_app`:
+
+```python
+created.include(registrar, timeout=settings.events.publish_timeout)
+app = create_app(registrar=registrar, publishers=[created], providers=providers)
+```
+
+Manual registration wins over discovery. Subscriber references in the same app use
+the effective publication options without changing the original declaration.
+Separate processes must receive consistent routing settings themselves. Settings
+are applied during assembly, never read from a file per message. Bind different
+handles when simultaneous applications publish through different brokers; one
+handle retains one active binding. Each router belongs to its selected application
+and transport; startup/shutdown remain with the existing native application.
+
 ### Scheduler functions
 
 Place a router in `schedulers.py` or a `schedulers/` package below an
