@@ -17,14 +17,16 @@ from papilio_tasks.apps.projections.registry.nats import (
     NatsRegistrar as Projects,
 )
 from papilio_tasks.apps.projections.router import ProjectionRouter
-from papilio_tasks.apps.schedulers import TaskRouter
+from papilio_tasks.apps.schedulers import Task, TaskRouter
 from papilio_tasks.apps.schedulers.application import create_broker
 from papilio_tasks.apps.schedulers.registry.nats import NatsRegistrar
 from papilio_tasks.infra.taskiq.brokers.backends.nats import JetStreamBroker
 
 
 @pytest.mark.parametrize("family", ["scheduler", "projection"])
-@pytest.mark.parametrize("style", ["legacy", "markers"])
+@pytest.mark.parametrize(
+    "style", ["legacy", "markers", "contract", "contract_empty"]
+)
 async def test_function_taskiq_nats_delivery_without_redis(family, style):
     url = os.environ.get("TEST_NATS_URL")
     if not url:
@@ -69,12 +71,38 @@ async def test_function_taskiq_nats_delivery_without_redis(family, style):
     async def native_write(data: str, *, service: FromDishka[Service]) -> int:
         return await write(service, data)
 
+    async def native_read_all(
+        *, service: FromDishka[Service], message: FromDishka[TaskiqMessage]
+    ) -> int:
+        return await native_read(
+            Payload(value=7), service=service, message=message
+        )
+
     if family == "scheduler":
         router = TaskRouter()
 
-        if style == "markers":
+        if style == "contract_empty":
+            task = Task[[], int](name=name + ".contract_empty")
 
-            @router.task(payload=Payload)
+            @router.task(task)
+            async def tick(
+                *,
+                service: FromDishka[Service],
+                message: FromDishka[TaskiqMessage],
+            ) -> int:
+                value = await native_read_all(service=service, message=message)
+                seen.append((str(value), service))
+                return value
+
+        elif style in {"markers", "contract"}:
+            reference = Task[[Payload], int](name=name + ".contract")
+            decorator = (
+                router.task(reference)
+                if style == "contract"
+                else router.task(payload=Payload)
+            )
+
+            @decorator
             async def task(
                 payload: Payload,
                 *,
@@ -86,6 +114,9 @@ async def test_function_taskiq_nats_delivery_without_redis(family, style):
                 )
                 seen.append((str(value), service))
                 return value
+
+            if style == "contract":
+                task = reference
 
         else:
 
@@ -102,7 +133,23 @@ async def test_function_taskiq_nats_delivery_without_redis(family, style):
         )
     else:
         router = ProjectionRouter()
-        if style == "markers":
+        if style == "contract_empty":
+            task = Task[[], int](name=name + ".contract_empty")
+            router.projection(
+                task,
+                read=native_read_all,
+                transform=native_transform,
+                write=native_write,
+            )
+        elif style == "contract":
+            task = Task[[Payload], int](name=name + ".contract")
+            router.projection(
+                task,
+                read=native_read,
+                transform=native_transform,
+                write=native_write,
+            )
+        elif style == "markers":
             task = router.projection(
                 payload=Payload,
                 read=native_read,
@@ -121,13 +168,17 @@ async def test_function_taskiq_nats_delivery_without_redis(family, style):
     broker.is_worker_process = True
     try:
         await broker.startup()
-        await task.enqueue(Payload(value=7))
+        if style == "contract_empty":
+            await task.enqueue()
+        else:
+            await task.enqueue(Payload(value=7))
         assert services.instances == []
         async with aclosing(broker.listen()) as messages:
             async with asyncio.timeout(15):
                 delivery = await anext(messages)
                 wire = broker.formatter.loads(delivery.data)
-                assert wire.args == [{"value": 7}] and not wire.kwargs
+                expected = [] if style == "contract_empty" else [{"value": 7}]
+                assert wire.args == expected and not wire.kwargs
                 await Receiver(broker).callback(delivery)
         assert len(seen) == 1 and seen[0][0] == "7"
         assert seen[0][1].closed

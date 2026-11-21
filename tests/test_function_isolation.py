@@ -22,19 +22,26 @@ class Block(importlib.abc.MetaPathFinder):
             raise ImportError('Unexpected dependency: ' + fullname)
 sys.meta_path.insert(0, Block())
 if family == 'scheduler':
-    from papilio_tasks.apps.schedulers import TaskRouter
+    from papilio_tasks.apps.schedulers import Task, TaskRouter
     from papilio_tasks.apps.schedulers.application import create_broker
     router = TaskRouter()
     @router.task()
     async def task(value: int) -> int: return value
+    reference = Task[[], int](name='isolated.scheduler')
+    @router.task(reference)
+    async def tick() -> int: return 1
     broker = create_broker(routers=[router])
 elif family == 'projection':
-    from papilio_tasks.apps.projections.router import ProjectionRouter
+    from papilio_tasks.apps.projections.router import Task, ProjectionRouter
     from papilio_tasks.apps.projections.application import create_broker
     router = ProjectionRouter()
     async def operation(value: int) -> int: return value
     task = router.projection(
         read=operation, transform=operation, write=operation,
+    )
+    reference = Task[[int], int](name='isolated.projection')
+    router.projection(
+        reference, read=operation, transform=operation, write=operation,
     )
     broker = create_broker(routers=[router])
 else:

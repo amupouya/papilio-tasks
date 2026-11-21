@@ -14,7 +14,7 @@ from papilio_tasks.apps.events.routers.nats import NatsRouter
 from papilio_tasks.apps.outbox import Outbox, OutboxWriter
 from papilio_tasks.apps.outbox.decorators import publish as outbox_publish
 from papilio_tasks.apps.projections.router import ProjectionRouter
-from papilio_tasks.apps.schedulers.router import TaskRouter
+from papilio_tasks.apps.schedulers.router import Task, TaskRouter
 from papilio_tasks.infra.taskiq.sources.backends.memory import MemorySource
 
 
@@ -31,6 +31,28 @@ class Payload(BaseModel):
 
 
 jobs = TaskRouter()
+
+tick = Task[[], int](name="tick")
+selected = Task[[Payload, int], str](name="selected")
+
+
+@jobs.task(tick, schedule=[{"interval": 60}])
+async def run_tick(*, service: FromDishka[Service]) -> int:
+    return 1
+
+
+@jobs.task(selected)
+async def run_selected(
+    payload: Payload, factor: int, *, cache: FromDishka[Cache]
+) -> str:
+    return str(payload.value * factor)
+
+
+async def wrong_result(*, service: FromDishka[Service]) -> str:
+    return "wrong"
+
+
+jobs.task(tick)(wrong_result)  # expect-error
 
 
 @jobs.task(payload=Payload)
@@ -104,6 +126,28 @@ native_projection = projections.projection(
     write=marked_write,
 )
 
+projection_reference = Task[[Payload], int](name="projection.reference")
+contract_projection = projections.projection(
+    projection_reference,
+    read=marked_read,
+    transform=marked_transform,
+    write=marked_write,
+)
+
+projection_all = Task[[], int](name="projection.all")
+
+
+async def read_all(*, service: FromDishka[Service]) -> list[int]:
+    return [1]
+
+
+all_projection = projections.projection(
+    projection_all,
+    read=read_all,
+    transform=marked_transform,
+    write=marked_write,
+)
+
 
 @events.subscriber("native")
 async def marked_receive(
@@ -139,6 +183,32 @@ async def usage(
     assert_type(await plain.cron(source, "* * * * *", 1), CreatedSchedule[str])
     assert_type(await plain.every(source, 60, 1), CreatedSchedule[str])
     message = Payload(value=1)
+    assert_type(await tick.enqueue(), AsyncTaskiqTask[int])
+    assert_type(await tick.every(source, 60), CreatedSchedule[int])
+    assert_type(await tick.at(source, now), CreatedSchedule[int])
+    assert_type(await tick.cron(source, "* * * * *"), CreatedSchedule[int])
+    assert_type(await selected.enqueue(message, 2), AsyncTaskiqTask[str])
+    assert_type(
+        await projection_reference.enqueue(message), AsyncTaskiqTask[int]
+    )
+    assert_type(
+        await contract_projection.enqueue(message), AsyncTaskiqTask[int]
+    )
+    assert_type(await projection_all.enqueue(), AsyncTaskiqTask[int])
+    assert_type(await all_projection.enqueue(), AsyncTaskiqTask[int])
+    assert_type(await run_tick(service=Service()), int)
+    assert_type(await run_selected(message, 2, cache=Cache()), str)
+    await tick.enqueue(1)  # expect-error
+    await tick.enqueue(service=Service())  # expect-error
+    await tick.every(source, 60, 1)  # expect-error
+    await selected.enqueue(message)  # expect-error
+    await selected.enqueue(message, "wrong")  # expect-error
+    await selected.enqueue(message, 2, cache=Cache())  # expect-error
+    await selected.at(source, now, 123, 2)  # expect-error
+    await projection_reference.enqueue(1)  # expect-error
+    await contract_projection.enqueue(1)  # expect-error
+    await projection_all.enqueue(message)  # expect-error
+    await run_tick()  # expect-error
     assert_type(await marked.enqueue(message), AsyncTaskiqTask[int])
     assert_type(await marked.at(source, now, message), CreatedSchedule[int])
     assert_type(

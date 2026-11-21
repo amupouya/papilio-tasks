@@ -16,6 +16,8 @@ class Function[R]:
         self,
         function: Callable[..., Awaitable[R]],
         dependency: type[Any] | None = None,
+        *,
+        keyword_dependencies: bool = False,
     ) -> None:
         if not iscoroutinefunction(function):
             raise TypeError("Router handlers must be async functions")
@@ -37,6 +39,13 @@ class Function[R]:
         )
         self.injected: Callable[..., Awaitable[R]] | None = None
         if marked:
+            if keyword_dependencies and any(
+                p.name in marked and p.kind != Parameter.KEYWORD_ONLY
+                for p in parameters
+            ):
+                raise TypeError(
+                    "Task reference dependencies must be keyword-only"
+                )
             if dependency is not None:
                 raise TypeError("Choose FromDishka or dependency=, not both")
             if any(
@@ -73,6 +82,8 @@ class Function[R]:
             if self.hints.get(first.name) != dependency:
                 raise TypeError("First argument must annotate dependency")
             self.hints.pop(first.name, None)
+        # No-input handlers need no positional-to-keyword remapping either.
+        self._payload_first = self._payload_first or not parameters
         self.signature: Signature = selected.replace(
             parameters=[
                 p.replace(annotation=self.hints.get(p.name, p.annotation))

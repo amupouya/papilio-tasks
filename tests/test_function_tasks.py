@@ -272,11 +272,14 @@ def test_router_discovery_nested_packages_reexports_and_mixed_classes(
         (path / "__init__.py").write_text("")
     (folder / "group" / "schedulers" / "tasks.py").write_text(
         dedent("""
-        from papilio_tasks.apps.schedulers import Scheduler, TaskRouter
+        from papilio_tasks.apps.schedulers import Scheduler, Task, TaskRouter
         router = TaskRouter()
         alias = router
         @router.task()
         async def job(value: int) -> int: return value
+        reference = Task[[], int](name="contract-discovery.scheduler")
+        @router.task(reference)
+        async def contract_job() -> int: return 3
         class Legacy(Scheduler):
             async def run(self): return 2
     """)
@@ -293,6 +296,7 @@ def test_router_discovery_nested_packages_reexports_and_mixed_classes(
     broker = create_broker(modules=roots, routers=[module.router])
     assert set(broker.local_task_registry) == {
         module.job.name,
+        module.reference.name,
         module.__name__ + ".Legacy",
     }
 
@@ -332,12 +336,15 @@ async def test_projection_discovery_mixes_classes_and_functions(
     (folder / "projections" / "__init__.py").write_text(
         dedent("""
         from papilio_tasks.apps.projections import Direct
+        from papilio_tasks.apps.schedulers import Task
         from papilio_tasks.apps.projections.router import ProjectionRouter
         router = ProjectionRouter()
         async def read(value: int) -> int: return value
         async def convert(data: int) -> str: return str(data)
         async def write(data: str) -> int: return int(data) * 2
         task = router.projection(read=read, transform=convert, write=write)
+        reference = Task[[int], int](name="contract-discovery.projection")
+        router.projection(reference, read=read, transform=convert, write=write)
         class Legacy(Direct[int, int]):
             def __init__(self): super().__init__()
             async def read(self, value: int) -> int: return value
@@ -352,11 +359,12 @@ async def test_projection_discovery_mixes_classes_and_functions(
         providers=[provider],
         routers=[module.router],
     )
-    assert len(broker.local_task_registry) == 2
+    assert len(broker.local_task_registry) == 3
     await broker.startup()
     try:
         assert await result(await module.Legacy.enqueue(4)) == 5
         assert await result(await module.task.enqueue(4)) == 8
+        assert await result(await module.reference.enqueue(4)) == 8
     finally:
         await broker.shutdown()
 

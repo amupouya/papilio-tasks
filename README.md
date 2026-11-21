@@ -246,20 +246,25 @@ parameters. Each handler can request several independently provided services.
 Providers remain registered through the existing `providers=` bootstrap option;
 the router uses the existing request scope and creates no second container.
 
-For Taskiq, declare one explicit payload contract. That keeps injected arguments
-out of the message and gives `enqueue`, `at`, `cron` and `every` an exact payload
-and result type:
+For Taskiq, declare a typed `Task` separately from its handler. Its parameter
+list describes only serialized inputs; its result type describes the worker
+result. Dependencies stay on the function, without `payload=` or `dependency=`:
 
 ```python
 from dishka import FromDishka
 from pydantic import BaseModel
+from papilio_tasks.apps.schedulers import Task
 from myapp.templates.services import Templates, TemplateCache
 
 class RefreshRequest(BaseModel):
     template_id: int
     force: bool = False
 
-@router.task(payload=RefreshRequest, name="templates.refresh_with_services")
+# These contracts can live in a module that does not import worker services.
+refresh = Task[[RefreshRequest], int](name="templates.refresh_with_services")
+refresh_all = Task[[], None](name="templates.refresh_all")
+
+@router.task(refresh)
 async def refresh_with_services(
     request: RefreshRequest,
     *,
@@ -270,25 +275,44 @@ async def refresh_with_services(
     await cache.invalidate(request.template_id)
     return result
 
-handle = await refresh_with_services.enqueue(RefreshRequest(template_id=12))
+@router.task(refresh_all, schedule=[{"interval": 60}])
+async def refresh_periodically(*, templates: FromDishka[Templates]) -> None:
+    await templates.refresh_all()
+
+handle = await refresh.enqueue(RefreshRequest(template_id=12))
+await refresh_all.enqueue()
 ```
 
-In this explicit contract mode, the first argument is the annotated payload;
-all remaining handler parameters must be native injection markers. Send the
-payload positionally. Ordinary Taskiq/Pydantic conversion handles its wire value;
+`Task[[], Result]` has no input; `Task[[Input], Result]` accepts one positional
+input; `Task[[Input, int], Result]` accepts two. The handler's ordinary parameters
+must match that contract, with their own annotations for native wire conversion.
+`FromDishka` dependencies are keyword-only (`*, service: FromDishka[Service]`)
+and excluded from the worker's serialized signature. Ordinary inputs can be
+positional-only; dependency placement cannot consume a serialized argument.
+The decorator returns the original function for direct calls with explicit
+dependencies. `reference.function` also exposes it after declaration.
+
+The existing router discovery and `create_broker` assemble the referenced
+handler; declaring a `Task` alone does not bind it to a broker. Before assembly
+and after shutdown, sending raises the existing unregistered-definition error.
+One reference has one handler and one active application binding. `at`, `cron`,
+`every` and native `task()` work on the reference as on existing task handles.
+`schedule=` supplies ordinary native schedule labels; source and beat remain
+explicit bootstrap choices. Reference labels/retry are defaults; handler options
+override them without changing the reference. Its name cannot be overridden.
+
+Ordinary Taskiq/Pydantic conversion handles the wire value;
 no services or containers are serialized. Native Dishka components, scope caches,
 errors and cleanup remain in force. Every retry attempt uses its own existing
 request scope. Services can be shared within that scope by requesting the same
 provided type more than once. No dependency provider is inferred from the handler.
 
-A marked Taskiq handler requires `payload=YourPayload`. Runtime signature filtering
-alone cannot tell a static type checker which arbitrary `ParamSpec` arguments to
-remove; the explicit contract avoids an untyped enqueue fallback. Task functions
-without injection retain their existing multi-argument `ParamSpec` API.
-
-For local calls, `.function` is the original callable and its marked arguments
-must be supplied explicitly. The annotations are unchanged. Native injected
-parameters cannot be positional-only; keyword-only parameters work naturally.
+The original plain/leading-service function APIs remain supported. Without a
+separate reference, a marked handler still uses the existing
+`@router.task(payload=YourPayload)` single-input form; its decorator returns the
+deferred handle. No arbitrary dependency parameters are erased from `ParamSpec`
+or replaced by an untyped send API. Native injected parameters cannot be
+positional-only; keyword-only parameters work naturally.
 
 The 1.8 `dependency=Service` leading-argument form remains available for existing
 code. It cannot be mixed with `FromDishka` markers or `payload=`. New declarations
@@ -326,15 +350,17 @@ native task handle. `at`, `cron`, `every`, native `task()` and the result-preser
 `publish_hooks=` select provided hook classes; registrar/application hooks keep
 their existing order and error semantics.
 
-For native parameter DI, pass `payload=ReadRequest` to `router.projection(...)`.
-Read takes that payload first; transform and write each take their stage's data
-first. Each stage can then declare its own `FromDishka` parameters, including
+For native parameter DI, pass a separate typed `Task` reference to
+`router.projection(reference, ...)`. Read accepts the contract's inputs (or no
+inputs); transform and write each take their stage's data first. Each stage can
+declare its own `FromDishka` parameters, including
 different services in different stages. These dependencies are resolved when
 that stage runs, using the same existing request scope/cache. Shared/local hooks
 and failure-stage reporting keep their existing behavior. For example:
 
 ```python
 from dishka import FromDishka
+from papilio_tasks.apps.projections.router import Task
 
 async def read(
     request: RefreshRequest, *, templates: FromDishka[Templates],
@@ -349,11 +375,17 @@ async def transform(
 async def write(data: str, *, cache: FromDishka[TemplateCache]) -> int:
     return await cache.store(data)
 
-refresh = router.projection(
-    payload=RefreshRequest, read=read, transform=transform, write=write,
+refresh = Task[[RefreshRequest], int](name="templates.projection_with_services")
+projection = router.projection(
+    refresh, read=read, transform=transform, write=write,
 )
 handle = await refresh.enqueue(RefreshRequest(template_id=12))
 ```
+
+Sending through the reference preserves projection publication hooks. The
+returned projection also retains `project(select=...)`, stage hooks and all
+existing helpers. A stage without dependencies needs no injection marker or
+shared service. The previous `payload=ReadRequest` form remains supported.
 
 Write continues to own persistence and commit/partial-failure behavior. The
 previous `dependency=Templates` form still supplies the same leading service to

@@ -1,6 +1,6 @@
 """Typed deferred task references over the existing native registration."""
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timedelta
 from functools import wraps
@@ -33,31 +33,54 @@ class Task[**P, R]:
 
     def __init__(
         self,
-        call: Function[Any],
+        call: Function[Any] | None = None,
         *,
         name: str | None = None,
         retry: Retry | None = None,
         labels: Mapping[str, Any] | None = None,
     ) -> None:
         self.call = call
-        self.function = call.function
-        self.name = call.name if name is None else name
-        if not isinstance(self.name, str) or not self.name:
-            raise ValueError("Task name cannot be empty")
+        selected_name = (
+            call.name if name is None and call is not None else name
+        )
+        if not isinstance(selected_name, str) or not selected_name:
+            raise ValueError("Task name is required and cannot be empty")
+        self.name = selected_name
         if retry is not None and not isinstance(retry, Retry):
             raise TypeError("retry must be Retry or None")
         self.retry = retry
         self.labels = deepcopy(dict(labels or {}))
         self.publish_hooks: type[PublishHooks] | None = None
-        self.__module__ = self.function.__module__
-        self.__qualname__ = self.function.__qualname__
+        self._implementation: Task[..., R] | None = None
+        if call is not None:
+            self.__module__ = call.function.__module__
+            self.__qualname__ = call.function.__qualname__
+        else:
+            self.__qualname__ = self.name
+
+    @property
+    def function(self) -> Callable[..., Awaitable[Any]]:
+        """Expose the original handler for explicitly supplied local DI."""
+        if self._implementation is not None:
+            return self._implementation.function
+        if self.call is None:
+            raise RuntimeError("Task has no handler declaration")
+        return self.call.function
+
+    def _attach(self, implementation: "Task[..., R]") -> None:
+        if self.call is not None or self._implementation is not None:
+            raise ValueError(f"Task already has a handler: {self.name}")
+        self._implementation = implementation
 
     def task(self) -> AsyncTaskiqDecoratedTask[Any, R]:
-        return bindings.get(self)
+        selected = self._implementation
+        return bindings.get(self if selected is None else selected)
 
     async def enqueue(
         self, *args: P.args, **kwargs: P.kwargs
     ) -> AsyncTaskiqTask[R]:
+        if self._implementation is not None:
+            return await self._implementation.enqueue(*args, **kwargs)
         return cast(AsyncTaskiqTask[R], await self.task().kiq(*args, **kwargs))
 
     async def at(
@@ -102,10 +125,15 @@ class Task[**P, R]:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> R:
+        assert self.call is not None
         function = await self.call.bind(scope)
         return await function(*args, **kwargs)
 
     def include(self, broker: BrokerContract) -> AsyncTaskiqDecoratedTask:
+        if self.call is None:
+            raise TypeError(
+                "Include the router that declares this Task handler"
+            )
         bindings.check(self)
         labels = retry_labels(broker.native, self.retry, deepcopy(self.labels))
 

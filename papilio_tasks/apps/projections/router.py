@@ -41,10 +41,8 @@ class ProjectionTask[**P, T, D, R](Task[P, R]):
             ):
                 raise TypeError("Select a provided hook class")
         result = write.hints.get("return", Any)
-        self.call.hints["return"] = result
-        self.call.signature = self.call.signature.replace(
-            return_annotation=result
-        )
+        read.hints["return"] = result
+        read.signature = read.signature.replace(return_annotation=result)
 
     async def enqueue(
         self, *args: P.args, **kwargs: P.kwargs
@@ -102,6 +100,21 @@ class ProjectionRouter:
         self.tasks: list[ProjectionTask[..., Any, Any, Any]] = []
 
     @overload
+    def projection[**P, T, **B, D, **C, R](
+        self,
+        reference: Task[P, R],
+        *,
+        read: Callable[..., Awaitable[T]],
+        transform: Callable[Concatenate[T, B], Awaitable[D]],
+        write: Callable[Concatenate[D, C], Awaitable[R]],
+        name: str | None = None,
+        retry: Retry | None = None,
+        labels: Mapping[str, Any] | None = None,
+        hooks: type[Hooks[T, D, R]] | None = None,
+        publish_hooks: type[PublishHooks] | None = None,
+    ) -> ProjectionTask[P, T, D, R]: ...
+
+    @overload
     def projection[I, **A, T, **B, D, **C, R](
         self,
         *,
@@ -149,8 +162,9 @@ class ProjectionRouter:
         payload: None = None,
     ) -> ProjectionTask[P, T, D, R]: ...
 
-    def projection(
+    def projection[**P, R](
         self,
+        reference: Task[P, R] | None = None,
         *,
         read: Callable[..., Awaitable[Any]],
         transform: Callable[..., Awaitable[Any]],
@@ -163,17 +177,37 @@ class ProjectionRouter:
         publish_hooks: type[PublishHooks] | None = None,
         payload: type[Any] | None = None,
     ) -> ProjectionTask[..., Any, Any, Any]:
+        if reference is not None:
+            if not isinstance(reference, Task):
+                raise TypeError("reference must be a Task")
+            if payload is not None or dependency is not None:
+                raise TypeError(
+                    "Task references do not use payload= or dependency="
+                )
+            if name is not None and name != reference.name:
+                raise ValueError("Task reference name cannot be overridden")
+            name = reference.name
+            retry = reference.retry if retry is None else retry
+            labels = reference.labels | dict(labels or {})
         if payload is not None and dependency is not None:
             raise TypeError("Use FromDishka with payload=, not dependency=")
         reader, converter, writer = (
-            Function(read, dependency),
-            Function(transform, dependency),
-            Function(write, dependency),
+            Function(
+                read, dependency, keyword_dependencies=reference is not None
+            ),
+            Function(
+                transform,
+                dependency,
+                keyword_dependencies=reference is not None,
+            ),
+            Function(
+                write, dependency, keyword_dependencies=reference is not None
+            ),
         )
 
         if payload is not None:
             reader.check_payload(payload)
-        elif any(
+        elif reference is None and any(
             stage.injected is not None for stage in (reader, converter, writer)
         ):
             raise TypeError(
@@ -191,5 +225,7 @@ class ProjectionRouter:
             hooks=hooks,
             publish_hooks=publish_hooks,
         )
+        if reference is not None:
+            reference._attach(task)
         self.tasks.append(task)
         return task

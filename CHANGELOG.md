@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.11.0 — 2026-11-21
+
+- Declare independent typed `Task[Parameters, Result](name=...)` contracts for
+  function schedulers and projections. Bind handlers with `router.task(reference)`
+  or `router.projection(reference, read=..., transform=..., write=...)` without
+  `payload=` or a shared `dependency=` service.
+- Support no-input jobs and multiple serialized inputs alongside native
+  `FromDishka` dependencies. References keep typed enqueue/time/cron/interval
+  calls; scheduler decorators preserve directly callable original handlers.
+- Accept native `schedule=` labels on scheduler functions. Existing discovery,
+  class/function APIs, native Taskiq execution, request scopes, retry, projection
+  hooks and transport/source ownership remain supported.
+
 ## 1.10.0 — 2026-11-19
 
 - Require FastStream 0.7.8 for Events, including its corrected bound Redis List
